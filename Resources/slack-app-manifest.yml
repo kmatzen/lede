@@ -1,0 +1,29 @@
+# Paste this into api.slack.com/apps → Create New App → From a manifest.
+# Pick your dev workspace. Sets up scopes + redirect in one shot.
+#
+# Lede operates entirely on the user token (authed_user.access_token from
+# OAuth v2). No bot user + no bot scopes are required.
+display_information:
+  name: Lede
+  description: Triage Slack messages via the Lede menu-bar app.
+  background_color: "#1d2533"
+oauth_config:
+  # Slack matches scheme+host+path, ignoring the port. Registering the root
+  # http://localhost lets Lede's ephemeral loopback port work on any port.
+  redirect_urls:
+    - http://localhost
+  scopes:
+    user:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - users:read
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
