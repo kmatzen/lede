@@ -1,0 +1,77 @@
+import Cocoa
+import SwiftUI
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var menuBar: MenuBarController!
+    var engine: CoreEngine!
+    var settingsWindow: NSWindow?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let storage = Storage.shared
+        engine = CoreEngine(storage: storage)
+        menuBar = MenuBarController(engine: engine, onOpenSettings: { [weak self] in
+            self?.openSettings()
+        })
+        installEditMenu()
+
+        // Kick off an initial refresh if credentials exist.
+        Task { await engine.refreshIfConfigured() }
+    }
+
+    /// An `.accessory` app has no main menu by default, which means the standard
+    /// Cmd+V / Cmd+C / Cmd+A shortcuts aren't wired to the first responder and
+    /// TextField paste silently fails. Install a minimal Edit menu that forwards
+    /// these actions through the responder chain.
+    private func installEditMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit Lede",
+                        action: #selector(NSApplication.terminate(_:)),
+                        keyEquivalent: "q")
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo",
+                         action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo",
+                                    action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut",
+                         action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy",
+                         action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste",
+                         action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    func openSettings() {
+        if let w = settingsWindow {
+            w.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let view = SettingsView(engine: engine)
+        let host = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: host)
+        window.title = "Lede Settings"
+        window.setContentSize(NSSize(width: 520, height: 560))
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+    }
+}

@@ -1,0 +1,81 @@
+import SwiftUI
+
+struct DigestRowView: View {
+    let item: Digest.Item
+
+    var body: some View {
+        Button(action: open) {
+            HStack(alignment: .top, spacing: 8) {
+                scorePill
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Image(systemName: icon)
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                        Text(item.source.displayName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let sender = item.sender {
+                            Text("· \(sender)")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer()
+                        Text(item.receivedAt, style: .relative)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                    Text(item.summary)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                    if !item.reason.isEmpty {
+                        Text(item.reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .italic()
+                    }
+                }
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 8)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var icon: String {
+        switch item.source {
+        case .github: return "chevron.left.forwardslash.chevron.right"
+        case .gmail: return "envelope"
+        case .slack: return "number"
+        case .outlook: return "envelope.badge"
+        }
+    }
+
+    private var scorePill: some View {
+        Text("\(item.score)")
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .frame(width: 22, height: 22)
+            .background(color.opacity(0.25), in: Circle())
+            .foregroundStyle(color)
+    }
+
+    private var color: Color {
+        switch item.score {
+        case 9...: return .red
+        case 7...: return .orange
+        case 5...: return .yellow
+        case 3...: return .blue
+        default: return .secondary
+        }
+    }
+
+    private func open() {
+        if let url = item.url { NSWorkspace.shared.open(url) }
+    }
+}
