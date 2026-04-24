@@ -9,7 +9,9 @@ actor Storage {
 
     private let cacheURL: URL
     private let digestURL: URL
+    private let dismissedURL: URL
     private var triages: [String: ItemTriage] = [:]
+    private var dismissed: Set<String> = []
 
     init() throws {
         let fm = FileManager.default
@@ -19,10 +21,15 @@ actor Storage {
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
         self.cacheURL = dir.appendingPathComponent("triage_cache.json")
         self.digestURL = dir.appendingPathComponent("last_digest.json")
+        self.dismissedURL = dir.appendingPathComponent("dismissed.json")
 
         if let data = try? Data(contentsOf: cacheURL),
            let decoded = try? JSONDecoder.iso.decode([String: ItemTriage].self, from: data) {
             self.triages = decoded
+        }
+        if let data = try? Data(contentsOf: dismissedURL),
+           let decoded = try? JSONDecoder.iso.decode([String].self, from: data) {
+            self.dismissed = Set(decoded)
         }
     }
 
@@ -53,6 +60,25 @@ actor Storage {
     func saveDigest(_ d: Digest) {
         guard let data = try? JSONEncoder.iso.encode(d) else { return }
         try? data.write(to: digestURL, options: .atomic)
+    }
+
+    // MARK: - Dismissals
+
+    func allDismissed() -> Set<String> { dismissed }
+
+    func dismiss(_ hash: String) {
+        dismissed.insert(hash)
+        saveDismissed()
+    }
+
+    func clearDismissals() {
+        dismissed.removeAll()
+        saveDismissed()
+    }
+
+    private func saveDismissed() {
+        guard let data = try? JSONEncoder.iso.encode(Array(dismissed)) else { return }
+        try? data.write(to: dismissedURL, options: .atomic)
     }
 
     private func save() {

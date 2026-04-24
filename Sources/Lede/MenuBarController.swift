@@ -42,6 +42,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         button.title = count > 0 ? " \(count)" : ""
     }
 
+    private var outsideClickMonitor: Any?
+
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
         if event?.type == .rightMouseUp {
@@ -50,7 +52,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
 
         if panel.isVisible {
-            panel.orderOut(nil)
+            hidePanel()
         } else {
             showPanel(relativeTo: sender)
         }
@@ -68,7 +70,32 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        installOutsideClickMonitor()
         Task { await engine.refreshIfConfigured() }
+    }
+
+    private func hidePanel() {
+        panel.orderOut(nil)
+        removeOutsideClickMonitor()
+    }
+
+    /// Global monitors only fire for events in OTHER applications — clicks on our
+    /// own status bar item or panel stay local and don't trigger this. So any
+    /// event we see here is by definition an "outside" click.
+    private func installOutsideClickMonitor() {
+        guard outsideClickMonitor == nil else { return }
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            Task { @MainActor in self?.hidePanel() }
+        }
+    }
+
+    private func removeOutsideClickMonitor() {
+        if let m = outsideClickMonitor {
+            NSEvent.removeMonitor(m)
+            outsideClickMonitor = nil
+        }
     }
 
     private func showMenu() {

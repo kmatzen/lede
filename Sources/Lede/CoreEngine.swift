@@ -51,6 +51,30 @@ final class CoreEngine: ObservableObject {
         return nil
     }
 
+    // MARK: Dismiss
+
+    func dismiss(_ hash: String) async {
+        await storage.dismiss(hash)
+        // Remove from the current digest for instant UI feedback.
+        guard let current = digest else { return }
+        let remaining = current.items.filter { $0.contentHash != hash }
+        let updated = Digest(
+            generatedAt: current.generatedAt,
+            items: remaining,
+            synthesis: current.synthesis
+        )
+        digest = updated
+        await storage.saveDigest(updated)
+    }
+
+    func dismissCount() async -> Int {
+        await storage.allDismissed().count
+    }
+
+    func clearDismissals() async {
+        await storage.clearDismissals()
+    }
+
     // MARK: Refresh
 
     func refreshIfConfigured() async {
@@ -65,34 +89,47 @@ final class CoreEngine: ObservableObject {
         lastError = nil
         defer { isRefreshing = false }
 
+        Log.info("refresh start force=\(force)")
+
         guard let client = await anthropicClient() else {
             lastError = "No Claude credentials. Open Settings."
+            Log.warn("refresh aborted: no Claude credentials")
             return
         }
 
         let sources = enabledSources()
         if sources.isEmpty {
             lastError = "No sources configured. Open Settings."
+            Log.warn("refresh aborted: no sources configured")
             return
         }
+
+        let names = sources.map { $0.source.rawValue }.joined(separator: ",")
+        Log.info("fetching from \(sources.count) source(s): \(names)")
 
         // Fetch all sources in parallel; ignore individual failures.
         var allItems: [RawItem] = []
         var sourceErrors: [String] = []
-        await withTaskGroup(of: Result<[RawItem], Error>.self) { group in
+        await withTaskGroup(of: (Source, Result<[RawItem], Error>).self) { group in
             for s in sources {
                 group.addTask {
-                    do { return .success(try await s.fetch()) }
-                    catch { return .failure(error) }
+                    do { return (s.source, .success(try await s.fetch())) }
+                    catch { return (s.source, .failure(error)) }
                 }
             }
-            for await result in group {
+            for await (src, result) in group {
                 switch result {
-                case .success(let items): allItems.append(contentsOf: items)
-                case .failure(let err): sourceErrors.append("\(err.localizedDescription)")
+                case .success(let items):
+                    Log.info("\(src.rawValue): fetched \(items.count) item(s)")
+                    allItems.append(contentsOf: items)
+                case .failure(let err):
+                    Log.error("\(src.rawValue): fetch failed — \(err.localizedDescription)")
+                    sourceErrors.append("\(err.localizedDescription)")
                 }
             }
         }
+
+        Log.info("fetched \(allItems.count) total item(s) across all sources")
 
         if allItems.isEmpty && !sourceErrors.isEmpty {
             lastError = sourceErrors.joined(separator: "\n")
@@ -104,10 +141,12 @@ final class CoreEngine: ObservableObject {
             let digest = try await pipeline.run(items: allItems)
             self.digest = digest
             self.lastRefreshed = Date()
+            Log.info("digest built: \(digest.items.count) item(s) visible")
             if !sourceErrors.isEmpty {
                 self.lastError = "Partial: " + sourceErrors.joined(separator: "; ")
             }
         } catch {
+            Log.error("pipeline failed: \(error.localizedDescription)")
             self.lastError = error.localizedDescription
         }
     }

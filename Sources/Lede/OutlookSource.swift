@@ -3,21 +3,22 @@ import AppKit
 import CryptoKit
 
 /// Outlook via Microsoft Graph v1.0. OAuth 2.0 auth code + PKCE with loopback redirect.
-/// User registers an app in Azure Portal:
-///   - Supported account types: "Personal Microsoft accounts only" (consumer),
-///     or "Accounts in any organizational directory + Personal" (both).
-///   - Platform: Mobile and desktop applications.
-///   - Redirect URI: http://localhost (any port is accepted by Azure for MSA/common).
-///   - API permissions: Microsoft Graph → Delegated → Mail.Read + User.Read + offline_access.
-/// Then paste the Application (client) ID into Settings.
+///
+/// Client ID embeds the Lede Azure AD app registration. It's a public
+/// identifier — Microsoft's public-client flow uses PKCE, no client secret,
+/// so nothing sensitive leaks. The app is registered as "Personal Microsoft
+/// accounts only" so tenant is hardcoded to `consumers`.
 enum MicrosoftOAuth {
+    static let clientID = "d45905df-daf4-4ee0-a2b9-a3f37ba177dd"
+    static let tenant = "consumers"
+
     static let tokenHost = "https://login.microsoftonline.com"
     static let scopes = "offline_access Mail.Read User.Read"
 
-    private static func authorizeURL(tenant: String) -> URL {
+    private static var authorizeURL: URL {
         URL(string: "\(tokenHost)/\(tenant)/oauth2/v2.0/authorize")!
     }
-    private static func tokenURL(tenant: String) -> URL {
+    private static var tokenURL: URL {
         URL(string: "\(tokenHost)/\(tenant)/oauth2/v2.0/token")!
     }
 
@@ -27,8 +28,7 @@ enum MicrosoftOAuth {
         let expires_in: Int?
     }
 
-    /// `tenant` = "common" (personal + work) or "consumers" (personal only) or a tenant GUID.
-    static func connect(clientID: String, tenant: String) async throws -> Tokens {
+    static func connect() async throws -> Tokens {
         let server = LoopbackOAuthServer()
         let port = try await server.start()
         defer { server.stop() }
@@ -38,7 +38,7 @@ enum MicrosoftOAuth {
         let challenge = s256(verifier)
         let state = randomURLSafe(16)
 
-        var comps = URLComponents(url: authorizeURL(tenant: tenant), resolvingAgainstBaseURL: false)!
+        var comps = URLComponents(url: authorizeURL, resolvingAgainstBaseURL: false)!
         comps.queryItems = [
             .init(name: "client_id", value: clientID),
             .init(name: "response_type", value: "code"),
@@ -65,17 +65,17 @@ enum MicrosoftOAuth {
             "grant_type": "authorization_code",
             "code_verifier": verifier,
         ]
-        return try await postForm(tokenURL(tenant: tenant), form: form)
+        return try await postForm(tokenURL, form: form)
     }
 
-    static func refresh(clientID: String, tenant: String, refreshToken: String) async throws -> Tokens {
+    static func refresh(refreshToken: String) async throws -> Tokens {
         let form = [
             "client_id": clientID,
             "scope": scopes,
             "refresh_token": refreshToken,
             "grant_type": "refresh_token",
         ]
-        return try await postForm(tokenURL(tenant: tenant), form: form)
+        return try await postForm(tokenURL, form: form)
     }
 
     static func persist(_ t: Tokens) {
@@ -88,15 +88,13 @@ enum MicrosoftOAuth {
     }
 
     static func validAccessToken() async -> String? {
-        guard let clientID = Keychain.get(Keychain.Key.outlookClientID),
-              let access = Keychain.get(Keychain.Key.outlookAccess) else { return nil }
-        let tenant = Keychain.get(Keychain.Key.outlookTenant) ?? "common"
+        guard let access = Keychain.get(Keychain.Key.outlookAccess) else { return nil }
         let expiryStr = Keychain.get(Keychain.Key.outlookExpiry)
         let expiry = expiryStr.flatMap { ISO8601DateFormatter().date(from: $0) } ?? .distantPast
         if Date() < expiry.addingTimeInterval(-60) { return access }
         guard let r = Keychain.get(Keychain.Key.outlookRefresh) else { return access }
         do {
-            let t = try await refresh(clientID: clientID, tenant: tenant, refreshToken: r)
+            let t = try await refresh(refreshToken: r)
             persist(t)
             return t.access_token
         } catch {
@@ -148,7 +146,6 @@ struct OutlookSource: NotificationSource {
     let source: Source = .outlook
 
     var isConfigured: Bool {
-        Keychain.get(Keychain.Key.outlookClientID) != nil &&
         Keychain.get(Keychain.Key.outlookRefresh) != nil
     }
 

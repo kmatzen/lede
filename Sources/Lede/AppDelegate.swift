@@ -2,7 +2,7 @@ import Cocoa
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var menuBar: MenuBarController!
     var engine: CoreEngine!
     var settingsWindow: NSWindow?
@@ -57,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func openSettings() {
+        // Promote to .regular so Settings shows up in Cmd+Tab (and gets a Dock
+        // icon temporarily). We revert to .accessory in windowWillClose.
+        NSApp.setActivationPolicy(.regular)
+
         if let w = settingsWindow {
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -69,9 +73,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(NSSize(width: 520, height: 560))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow = window
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w === settingsWindow else { return }
+        // Drop the Dock icon + Cmd+Tab entry when the user closes Settings.
+        NSApp.setActivationPolicy(.accessory)
     }
 }

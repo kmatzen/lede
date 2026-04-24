@@ -7,9 +7,9 @@ struct SettingsView: View {
         TabView {
             ClaudeAuthPane(engine: engine)
                 .tabItem { Label("Claude", systemImage: "brain") }
-            SourcesPane()
+            SourcesPane(engine: engine)
                 .tabItem { Label("Sources", systemImage: "bell.badge") }
-            AboutPane()
+            AboutPane(engine: engine)
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
         .padding(16)
@@ -101,16 +101,17 @@ private struct ClaudeAuthPane: View {
 // MARK: - Sources
 
 private struct SourcesPane: View {
+    @ObservedObject var engine: CoreEngine
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                GitHubPane()
+                GitHubPane(engine: engine)
                 Divider()
-                GmailPane()
+                GmailPane(engine: engine)
                 Divider()
-                SlackPane()
+                SlackPane(engine: engine)
                 Divider()
-                OutlookPane()
+                OutlookPane(engine: engine)
             }.padding(8)
         }
     }
@@ -119,13 +120,14 @@ private struct SourcesPane: View {
 // MARK: GitHub pane
 
 private struct GitHubPane: View {
-    @State private var clientID: String = Keychain.get(Keychain.Key.githubClientID) ?? ""
+    let engine: CoreEngine
     @State private var pat: String = Keychain.get(Keychain.Key.githubPAT) ?? ""
     @State private var busy = false
     @State private var status = ""
     @State private var userCode = ""
     @State private var connected = Keychain.get(Keychain.Key.githubAccess) != nil
         || Keychain.get(Keychain.Key.githubPAT) != nil
+    @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
         section("GitHub") {
@@ -140,27 +142,28 @@ private struct GitHubPane: View {
                     }
                 }
             } else {
-                Text("Connect via OAuth device flow (recommended) or paste a PAT with `notifications` scope.")
+                Text("Connect via OAuth — a code appears below; click to open GitHub with it pre-filled.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Device flow needs an OAuth App client ID — create one at github.com/settings/developers with 'Enable Device Flow' turned on.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                TextField("OAuth App Client ID (Iv1.… or Ov23li…)", text: $clientID)
-                    .textFieldStyle(.roundedBorder)
                 HStack {
-                    Button("Connect via OAuth") { Task { await connectDevice() } }
+                    Button("Connect with GitHub") { task = Task { await connectDevice() } }
                         .buttonStyle(.borderedProminent)
-                        .disabled(clientID.isEmpty || busy)
-                    if busy { ProgressView().controlSize(.small) }
+                        .disabled(busy)
+                    if busy {
+                        ProgressView().controlSize(.small)
+                        Button("Cancel") { task?.cancel() }
+                    }
                 }
                 if !userCode.isEmpty {
                     HStack {
-                        Text("Enter this code:")
+                        Text("Code:")
                         Text(userCode).font(.system(.body, design: .monospaced, weight: .bold))
                             .textSelection(.enabled)
+                        Text("— waiting for approval…").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Divider().padding(.vertical, 4)
-                Text("Or PAT fallback:").font(.caption).foregroundStyle(.secondary)
+                Text("Or paste a PAT with `notifications` scope:")
+                    .font(.caption).foregroundStyle(.secondary)
                 SecureField("ghp_… or github_pat_…", text: $pat)
                     .textFieldStyle(.roundedBorder)
                 Button("Save PAT") {
@@ -180,18 +183,21 @@ private struct GitHubPane: View {
     }
 
     private func connectDevice() async {
-        Keychain.set(clientID, for: Keychain.Key.githubClientID)
         busy = true
         status = ""
         defer { busy = false }
         do {
-            let code = try await GitHubOAuth.requestDeviceCode(clientID: clientID)
+            let code = try await GitHubOAuth.requestDeviceCode()
             userCode = code.user_code
             GitHubOAuth.openVerificationPage(code)
-            let token = try await GitHubOAuth.pollForToken(clientID: clientID, deviceCode: code)
+            let token = try await GitHubOAuth.pollForToken(deviceCode: code)
             GitHubOAuth.persist(token)
             userCode = ""
             connected = true
+            Task { await engine.refresh(force: true) }
+        } catch is CancellationError {
+            status = "Cancelled."
+            userCode = ""
         } catch {
             status = error.localizedDescription
             userCode = ""
@@ -202,10 +208,11 @@ private struct GitHubPane: View {
 // MARK: Gmail pane
 
 private struct GmailPane: View {
-    @State private var clientID: String = Keychain.get(Keychain.Key.gmailClientID) ?? ""
+    let engine: CoreEngine
     @State private var busy = false
     @State private var status = ""
     @State private var connected = Keychain.get(Keychain.Key.gmailRefresh) != nil
+    @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
         section("Gmail") {
@@ -219,15 +226,16 @@ private struct GmailPane: View {
                     }
                 }
             } else {
-                Text("Create a 'Desktop app' OAuth client in Google Cloud Console, enable the Gmail API, then paste the Client ID here.")
+                Text("Browser will open to Google for approval. Lede only reads message headers + snippets — never message bodies.")
                     .font(.caption).foregroundStyle(.secondary)
-                TextField("xxxxxxxx.apps.googleusercontent.com", text: $clientID)
-                    .textFieldStyle(.roundedBorder)
                 HStack {
-                    Button("Connect Gmail") { Task { await connect() } }
+                    Button("Connect Gmail") { task = Task { await connect() } }
                         .buttonStyle(.borderedProminent)
-                        .disabled(clientID.isEmpty || busy)
-                    if busy { ProgressView().controlSize(.small) }
+                        .disabled(busy)
+                    if busy {
+                        ProgressView().controlSize(.small)
+                        Button("Cancel") { task?.cancel() }
+                    }
                 }
             }
             if !status.isEmpty {
@@ -238,14 +246,16 @@ private struct GmailPane: View {
     }
 
     private func connect() async {
-        Keychain.set(clientID, for: Keychain.Key.gmailClientID)
         busy = true
         status = ""
         defer { busy = false }
         do {
-            let tokens = try await GoogleOAuth.connect(clientID: clientID)
+            let tokens = try await GoogleOAuth.connect()
             GoogleOAuth.persist(tokens)
             connected = true
+            Task { await engine.refresh(force: true) }
+        } catch is CancellationError {
+            status = "Cancelled."
         } catch {
             status = error.localizedDescription
         }
@@ -255,11 +265,13 @@ private struct GmailPane: View {
 // MARK: Slack pane
 
 private struct SlackPane: View {
+    let engine: CoreEngine
     @State private var clientID: String = Keychain.get(Keychain.Key.slackClientID) ?? ""
     @State private var clientSecret: String = Keychain.get(Keychain.Key.slackClientSecret) ?? ""
     @State private var busy = false
     @State private var status = ""
     @State private var connected = Keychain.get(Keychain.Key.slackAccess) != nil
+    @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
         section("Slack") {
@@ -273,17 +285,20 @@ private struct SlackPane: View {
                     }
                 }
             } else {
-                Text("Create a Slack app at api.slack.com/apps, add a loopback redirect URL starting with http://localhost, then paste Client ID and Secret.")
+                Text("Create a Slack app at api.slack.com/apps — pick 'From a manifest' and paste Resources/slack-app-manifest.yml from the repo. Install to your workspace, then paste Client ID + Secret below.")
                     .font(.caption).foregroundStyle(.secondary)
                 TextField("Client ID", text: $clientID)
                     .textFieldStyle(.roundedBorder)
                 SecureField("Client Secret", text: $clientSecret)
                     .textFieldStyle(.roundedBorder)
                 HStack {
-                    Button("Connect Slack") { Task { await connect() } }
+                    Button("Connect Slack") { task = Task { await connect() } }
                         .buttonStyle(.borderedProminent)
                         .disabled(clientID.isEmpty || clientSecret.isEmpty || busy)
-                    if busy { ProgressView().controlSize(.small) }
+                    if busy {
+                        ProgressView().controlSize(.small)
+                        Button("Cancel") { task?.cancel() }
+                    }
                 }
             }
             if !status.isEmpty {
@@ -300,9 +315,12 @@ private struct SlackPane: View {
         status = ""
         defer { busy = false }
         do {
-            let token = try await SlackOAuth.connect(clientID: clientID, clientSecret: clientSecret)
-            Keychain.set(token, for: Keychain.Key.slackAccess)
+            let creds = try await SlackOAuth.connect(clientID: clientID, clientSecret: clientSecret)
+            SlackOAuth.persist(creds)
             connected = true
+            Task { await engine.refresh(force: true) }
+        } catch is CancellationError {
+            status = "Cancelled."
         } catch {
             status = error.localizedDescription
         }
@@ -312,11 +330,11 @@ private struct SlackPane: View {
 // MARK: Outlook pane
 
 private struct OutlookPane: View {
-    @State private var clientID: String = Keychain.get(Keychain.Key.outlookClientID) ?? ""
-    @State private var tenant: String = Keychain.get(Keychain.Key.outlookTenant) ?? "common"
+    let engine: CoreEngine
     @State private var busy = false
     @State private var status = ""
     @State private var connected = Keychain.get(Keychain.Key.outlookRefresh) != nil
+    @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
         section("Outlook") {
@@ -330,23 +348,16 @@ private struct OutlookPane: View {
                     }
                 }
             } else {
-                Text("Register a Desktop app in Azure Portal with Mail.Read + offline_access delegated permissions, then paste its Application (client) ID.")
+                Text("Browser opens Microsoft sign-in. Lede reads unread inbox messages only (Mail.Read scope).")
                     .font(.caption).foregroundStyle(.secondary)
-                TextField("Application (client) ID", text: $clientID)
-                    .textFieldStyle(.roundedBorder)
                 HStack {
-                    Text("Tenant:").font(.caption)
-                    Picker("", selection: $tenant) {
-                        Text("Personal + Work (common)").tag("common")
-                        Text("Personal only (consumers)").tag("consumers")
-                        Text("Work only (organizations)").tag("organizations")
-                    }.labelsHidden()
-                }
-                HStack {
-                    Button("Connect Outlook") { Task { await connect() } }
+                    Button("Connect Outlook") { task = Task { await connect() } }
                         .buttonStyle(.borderedProminent)
-                        .disabled(clientID.isEmpty || busy)
-                    if busy { ProgressView().controlSize(.small) }
+                        .disabled(busy)
+                    if busy {
+                        ProgressView().controlSize(.small)
+                        Button("Cancel") { task?.cancel() }
+                    }
                 }
             }
             if !status.isEmpty {
@@ -357,15 +368,16 @@ private struct OutlookPane: View {
     }
 
     private func connect() async {
-        Keychain.set(clientID, for: Keychain.Key.outlookClientID)
-        Keychain.set(tenant, for: Keychain.Key.outlookTenant)
         busy = true
         status = ""
         defer { busy = false }
         do {
-            let tokens = try await MicrosoftOAuth.connect(clientID: clientID, tenant: tenant)
+            let tokens = try await MicrosoftOAuth.connect()
             MicrosoftOAuth.persist(tokens)
             connected = true
+            Task { await engine.refresh(force: true) }
+        } catch is CancellationError {
+            status = "Cancelled."
         } catch {
             status = error.localizedDescription
         }
@@ -375,6 +387,9 @@ private struct OutlookPane: View {
 // MARK: - About
 
 private struct AboutPane: View {
+    let engine: CoreEngine
+    @State private var dismissedCount: Int = 0
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Lede 0.1").font(.title2).bold()
@@ -386,10 +401,40 @@ private struct AboutPane: View {
                 Text("• Content-hash cache: unchanged items cost 0 tokens").font(.caption)
                 Text("• Haiku for triage, Sonnet only for top-N synthesis").font(.caption)
                 Text("• Prompt caching on system prompts (~90% discount on re-use)").font(.caption)
-                Text("• Gmail pre-filtered server-side (unread, no promotions)").font(.caption)
+                Text("• Gmail scope `gmail.metadata` — headers + snippets only").font(.caption)
             }.foregroundStyle(.secondary)
+
+            Text("Dismissed items").font(.headline).padding(.top, 8)
+            HStack {
+                Text("\(dismissedCount) item(s) dismissed and filtered out.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset dismissals") {
+                    Task {
+                        await engine.clearDismissals()
+                        await engine.refresh(force: true)
+                        dismissedCount = 0
+                    }
+                }
+                .disabled(dismissedCount == 0)
+            }
+
+            Text("Debug").font(.headline).padding(.top, 8)
+            HStack {
+                Text("Pipeline writes to a log file (dedupe, fetch counts, filter decisions).")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Open log") {
+                    NSWorkspace.shared.open(Log.fileURL)
+                }
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
+                }
+            }
             Spacer()
-        }.padding(8)
+        }
+        .padding(8)
+        .task { dismissedCount = await engine.dismissCount() }
     }
 }
 

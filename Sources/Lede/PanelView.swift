@@ -54,17 +54,24 @@ struct PanelView: View {
 
     private func digestList(_ d: Digest) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 if let s = d.synthesis {
                     synthesisBox(s)
                 }
-                ForEach(d.items) { item in
-                    DigestRowView(item: item)
+                ForEach(PriorityTier.all) { tier in
+                    let items = d.items.filter { tier.range.contains($0.score) }
+                    if !items.isEmpty {
+                        TierSection(tier: tier, items: items, onDismiss: dismiss)
+                    }
                 }
                 footer(d)
             }
             .padding(10)
         }
+    }
+
+    private func dismiss(_ hash: String) {
+        Task { await engine.dismiss(hash) }
     }
 
     private func synthesisBox(_ s: String) -> some View {
@@ -117,5 +124,75 @@ struct PanelView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+// MARK: - Priority tiers
+
+struct PriorityTier: Identifiable {
+    let name: String
+    let range: ClosedRange<Int>
+    let color: Color
+    let defaultExpanded: Bool
+
+    var id: String { name }
+
+    static let all: [PriorityTier] = [
+        .init(name: "Critical", range: 9...10, color: .red, defaultExpanded: true),
+        .init(name: "High",     range: 6...8,  color: .orange, defaultExpanded: true),
+        .init(name: "Medium",   range: 4...5,  color: .yellow, defaultExpanded: false),
+        .init(name: "Low",      range: 0...3,  color: .gray, defaultExpanded: false),
+    ]
+}
+
+private struct TierSection: View {
+    let tier: PriorityTier
+    let items: [Digest.Item]
+    let onDismiss: (String) -> Void
+
+    @AppStorage private var expanded: Bool
+
+    init(tier: PriorityTier, items: [Digest.Item], onDismiss: @escaping (String) -> Void) {
+        self.tier = tier
+        self.items = items
+        self.onDismiss = onDismiss
+        self._expanded = AppStorage(
+            wrappedValue: tier.defaultExpanded,
+            "panel.tier.\(tier.name).expanded"
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: { expanded.toggle() }) {
+                HStack(spacing: 8) {
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Circle().fill(tier.color).frame(width: 7, height: 7)
+                    Text(tier.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                    Text("\(items.count)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if expanded {
+                VStack(spacing: 6) {
+                    ForEach(items) { item in
+                        DigestRowView(item: item, onDismiss: { onDismiss(item.contentHash) })
+                    }
+                }
+                .padding(.leading, 2)
+            }
+        }
     }
 }

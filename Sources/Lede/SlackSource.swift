@@ -2,18 +2,11 @@ import Foundation
 import AppKit
 import CryptoKit
 
-/// Slack OAuth 2.0 (v2) for a *user* token. Slack doesn't offer public
-/// read-your-messages APIs without a registered app, so the user has to
-/// create a Slack app on their workspace and supply client_id + client_secret.
+/// Slack OAuth 2.0 (v2) — user token, loopback redirect.
 ///
-/// Minimal app setup:
-///   1. https://api.slack.com/apps → Create New App → From scratch
-///   2. OAuth & Permissions → Add Redirect URL: http://localhost/oauth/slack
-///      (the actual port is ephemeral; Slack accepts any port as long as the
-///      scheme+host+path match — so register that URL then we vary the port)
-///   3. User Token Scopes: channels:history, groups:history, im:history,
-///      mpim:history, users:read, channels:read, groups:read, im:read, mpim:read
-///   4. Install to workspace — copy Client ID + Client Secret into Settings.
+/// Client ID + Secret are user-supplied (unlike Google's Desktop-app OAuth,
+/// Slack considers client secrets private). Create an app from
+/// Resources/slack-app-manifest.yml and paste its creds in Settings.
 enum SlackOAuth {
     static let authorizeURL = URL(string: "https://slack.com/oauth/v2/authorize")!
     static let tokenURL = URL(string: "https://slack.com/api/oauth.v2.access")!
@@ -23,19 +16,26 @@ enum SlackOAuth {
         let ok: Bool
         let error: String?
         let authed_user: AuthedUser?
-        struct AuthedUser: Decodable {
-            let access_token: String?
-        }
+        let team: Team?
+        struct AuthedUser: Decodable { let id: String?; let access_token: String? }
+        struct Team: Decodable { let id: String? }
     }
 
-    static func connect(clientID: String, clientSecret: String) async throws -> String {
-        // Slack's registered redirect must match exactly, but only on scheme+host+path —
-        // port is compared. So the registered URL pre-declares the port; we re-use it here.
-        // For zero-config we use 53682 (matches what many CLIs register).
+    /// Returns the user access token, user_id, and team_id so the source can
+    /// resolve @mentions and build deep-links.
+    struct Credentials {
+        let accessToken: String
+        let userID: String?
+        let teamID: String?
+    }
+
+    static func connect(clientID: String, clientSecret: String) async throws -> Credentials {
         let server = LoopbackOAuthServer()
         let port = try await server.start()
         defer { server.stop() }
 
+        // Slack matches redirect_uri on scheme+host+path, ignoring the port.
+        // Register `http://localhost` once; we vary the port.
         let redirect = "http://localhost:\(port)/oauth/slack"
         let state = randomHex(16)
 
@@ -77,11 +77,23 @@ enum SlackOAuth {
         guard parsed.ok, let token = parsed.authed_user?.access_token else {
             throw OAuthError.http(400, parsed.error ?? "unknown Slack error")
         }
-        return token
+        return Credentials(
+            accessToken: token,
+            userID: parsed.authed_user?.id,
+            teamID: parsed.team?.id
+        )
+    }
+
+    static func persist(_ c: Credentials) {
+        Keychain.set(c.accessToken, for: Keychain.Key.slackAccess)
+        if let u = c.userID { Keychain.set(u, for: Keychain.Key.slackUserID) }
+        if let t = c.teamID { Keychain.set(t, for: Keychain.Key.slackTeamID) }
     }
 
     static func signOut() {
         Keychain.delete(Keychain.Key.slackAccess)
+        Keychain.delete(Keychain.Key.slackUserID)
+        Keychain.delete(Keychain.Key.slackTeamID)
     }
 
     private static func randomHex(_ bytes: Int) -> String {
@@ -98,17 +110,22 @@ struct SlackSource: NotificationSource {
 
     func fetch() async throws -> [RawItem] {
         guard let token = Keychain.get(Keychain.Key.slackAccess) else { return [] }
+        let userID = Keychain.get(Keychain.Key.slackUserID)
+        let teamID = Keychain.get(Keychain.Key.slackTeamID)
 
-        // Strategy: pull conversations.list (user's DMs + channels), pick ones with
-        // unread_count_display > 0, then grab the last message from each. Keeps
-        // token volume tiny — we only LLM-triage unread conversations.
-        let convos = try await Self.conversations(token: token)
+        // Pull every conversation the user participates in (paginated), then
+        // only look at the ones with unread messages. Keeps volume bounded.
+        let convos = try await Self.allConversations(token: token)
         let unread = convos.filter { ($0.unread_count_display ?? 0) > 0 }
-        let userCache = await Self.userNameCache(token: token)
+        Log.info("slack: \(convos.count) conversation(s), \(unread.count) unread")
+        let users = await Self.userNameCache(token: token)
 
         return try await withThrowingTaskGroup(of: RawItem?.self) { group in
             for c in unread {
-                group.addTask { try await Self.buildItem(channel: c, token: token, users: userCache) }
+                group.addTask {
+                    try await Self.buildItem(channel: c, token: token, users: users,
+                                             userID: userID, teamID: teamID)
+                }
             }
             var out: [RawItem] = []
             for try await item in group { if let item { out.append(item) } }
@@ -116,7 +133,7 @@ struct SlackSource: NotificationSource {
         }
     }
 
-    // MARK: -
+    // MARK: - Conversations
 
     private struct Conversation: Decodable {
         let id: String
@@ -124,61 +141,99 @@ struct SlackSource: NotificationSource {
         let is_im: Bool?
         let is_mpim: Bool?
         let is_channel: Bool?
-        let user: String?
+        let user: String?  // DM partner user id
         let unread_count_display: Int?
     }
 
-    private static func conversations(token: String) async throws -> [Conversation] {
-        var comps = URLComponents(string: "https://slack.com/api/users.conversations")!
-        comps.queryItems = [
-            .init(name: "types", value: "public_channel,private_channel,im,mpim"),
-            .init(name: "exclude_archived", value: "true"),
-            .init(name: "limit", value: "100"),
-        ]
-        var req = URLRequest(url: comps.url!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: req)
-        struct Resp: Decodable { let ok: Bool; let channels: [Conversation]?; let error: String? }
-        let parsed = try JSONDecoder().decode(Resp.self, from: data)
-        guard parsed.ok else {
-            throw SourceError(source: .slack, message: parsed.error ?? "users.conversations failed")
-        }
-        return parsed.channels ?? []
+    /// Paginate through every conversation the user is a member of.
+    /// Cap at a reasonable total so a very large workspace doesn't lock us up.
+    private static func allConversations(token: String) async throws -> [Conversation] {
+        var all: [Conversation] = []
+        var cursor: String? = nil
+        let maxTotal = 500
+        repeat {
+            var comps = URLComponents(string: "https://slack.com/api/users.conversations")!
+            var items: [URLQueryItem] = [
+                .init(name: "types", value: "public_channel,private_channel,im,mpim"),
+                .init(name: "exclude_archived", value: "true"),
+                .init(name: "limit", value: "200"),
+            ]
+            if let c = cursor { items.append(.init(name: "cursor", value: c)) }
+            comps.queryItems = items
+
+            let (data, resp): (Data, URLResponse) = try await slackGet(comps.url!, token: token)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 429 {
+                // Rate-limited. Honor Retry-After and try once more.
+                let wait = Int(http.value(forHTTPHeaderField: "Retry-After") ?? "1") ?? 1
+                try await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
+                continue
+            }
+            struct Resp: Decodable {
+                let ok: Bool
+                let channels: [Conversation]?
+                let error: String?
+                let response_metadata: Meta?
+                struct Meta: Decodable { let next_cursor: String? }
+            }
+            let parsed = try JSONDecoder().decode(Resp.self, from: data)
+            guard parsed.ok else {
+                throw SourceError(source: .slack, message: parsed.error ?? "users.conversations failed")
+            }
+            all.append(contentsOf: parsed.channels ?? [])
+            let next = parsed.response_metadata?.next_cursor ?? ""
+            cursor = next.isEmpty ? nil : next
+        } while cursor != nil && all.count < maxTotal
+        return all
     }
+
+    // MARK: - User directory
 
     private static func userNameCache(token: String) async -> [String: String] {
-        var req = URLRequest(url: URL(string: "https://slack.com/api/users.list?limit=200")!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return [:] }
-        struct Resp: Decodable {
-            let ok: Bool
-            let members: [Member]?
-            struct Member: Decodable {
-                let id: String
-                let name: String?
-                let real_name: String?
-                struct Profile: Decodable { let display_name: String? }
-                let profile: Profile?
+        var all: [String: String] = [:]
+        var cursor: String? = nil
+        repeat {
+            var comps = URLComponents(string: "https://slack.com/api/users.list")!
+            var items: [URLQueryItem] = [.init(name: "limit", value: "200")]
+            if let c = cursor { items.append(.init(name: "cursor", value: c)) }
+            comps.queryItems = items
+
+            guard let (data, _) = try? await slackGet(comps.url!, token: token) else { return all }
+            struct Resp: Decodable {
+                let ok: Bool
+                let members: [Member]?
+                let response_metadata: Meta?
+                struct Meta: Decodable { let next_cursor: String? }
+                struct Member: Decodable {
+                    let id: String
+                    let name: String?
+                    let real_name: String?
+                    struct Profile: Decodable { let display_name: String? }
+                    let profile: Profile?
+                }
             }
-        }
-        guard let parsed = try? JSONDecoder().decode(Resp.self, from: data), parsed.ok else { return [:] }
-        var out: [String: String] = [:]
-        for m in parsed.members ?? [] {
-            out[m.id] = m.profile?.display_name?.nilIfEmpty ?? m.real_name ?? m.name ?? m.id
-        }
-        return out
+            guard let parsed = try? JSONDecoder().decode(Resp.self, from: data), parsed.ok else { return all }
+            for m in parsed.members ?? [] {
+                all[m.id] = m.profile?.display_name?.nilIfEmpty ?? m.real_name ?? m.name ?? m.id
+            }
+            let next = parsed.response_metadata?.next_cursor ?? ""
+            cursor = next.isEmpty ? nil : next
+        } while cursor != nil && all.count < 2000
+        return all
     }
 
-    private static func buildItem(channel: Conversation, token: String, users: [String: String]) async throws -> RawItem? {
-        // Fetch last message in that conversation.
+    // MARK: - Messages
+
+    private static func buildItem(channel: Conversation,
+                                  token: String,
+                                  users: [String: String],
+                                  userID: String?,
+                                  teamID: String?) async throws -> RawItem? {
         var comps = URLComponents(string: "https://slack.com/api/conversations.history")!
         comps.queryItems = [
             .init(name: "channel", value: channel.id),
             .init(name: "limit", value: "1"),
         ]
-        var req = URLRequest(url: comps.url!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: req)
+        guard let (data, _) = try? await slackGet(comps.url!, token: token) else { return nil }
         struct Resp: Decodable {
             let ok: Bool
             let messages: [Msg]?
@@ -205,16 +260,101 @@ struct SlackSource: NotificationSource {
             return Date()
         }()
 
+        // Rewrite Slack entity tokens into readable text for the LLM:
+        //   <@U123>  → @me (if it's the signed-in user), else @DisplayName
+        //   <#C123|general> → #general
+        //   <!here>, <!channel>, <!everyone> → @here / @channel / @everyone
+        let snippet = rewriteEntities(msg.text ?? "", users: users, selfID: userID)
+
+        // Direct-link that opens the Slack desktop app at the message:
+        //   slack://channel?team=T123&id=C456&message=1700000000.000100
+        // Fall back to web URL if we don't have team id.
+        let url: URL? = {
+            var parts: [URLQueryItem] = [
+                .init(name: "team", value: teamID ?? ""),
+                .init(name: "id", value: channel.id),
+            ]
+            if let ts = msg.ts { parts.append(.init(name: "message", value: ts)) }
+            var c = URLComponents()
+            c.scheme = "slack"
+            c.host = "channel"
+            c.queryItems = parts
+            return c.url
+        }()
+
         return RawItem(
             id: "\(channel.id):\(msg.ts ?? "")",
             source: .slack,
             title: channelName,
             sender: sender,
-            snippet: String((msg.text ?? "").prefix(500)),
-            url: URL(string: "slack://channel?team=&id=\(channel.id)"),
+            snippet: String(snippet.prefix(500)),
+            url: url,
             receivedAt: received,
             isUnread: true
         )
+    }
+
+    // MARK: - Helpers
+
+    /// Slack messages use `<@U123>`, `<#C123|name>`, and `<!here>` tokens.
+    /// The triage LLM doesn't know those — translate to human form, and mark
+    /// the signed-in user as `@me` so the triage rubric's @mention boost fires.
+    private static func rewriteEntities(_ text: String, users: [String: String], selfID: String?) -> String {
+        var out = text
+
+        // <@USERID> or <@USERID|label>
+        let userPattern = try! NSRegularExpression(pattern: "<@([A-Z0-9]+)(?:\\|[^>]+)?>")
+        out = substitute(out, pattern: userPattern) { match, src in
+            let id = (src as NSString).substring(with: match.range(at: 1))
+            if let self_ = selfID, id == self_ { return "@me" }
+            if let name = users[id] { return "@\(name)" }
+            return "@\(id)"
+        }
+
+        // <#CHANNELID|name>  or <#CHANNELID>
+        let channelPattern = try! NSRegularExpression(pattern: "<#([A-Z0-9]+)(?:\\|([^>]+))?>")
+        out = substitute(out, pattern: channelPattern) { match, src in
+            if match.range(at: 2).location != NSNotFound {
+                return "#" + (src as NSString).substring(with: match.range(at: 2))
+            }
+            return "#channel"
+        }
+
+        // <!here>, <!channel>, <!everyone>, <!subteam^ID|label>
+        let bangPattern = try! NSRegularExpression(pattern: "<!([^>|]+)(?:\\|([^>]+))?>")
+        out = substitute(out, pattern: bangPattern) { match, src in
+            let keyword = (src as NSString).substring(with: match.range(at: 1))
+            if match.range(at: 2).location != NSNotFound {
+                return "@" + (src as NSString).substring(with: match.range(at: 2))
+            }
+            return "@\(keyword)"
+        }
+
+        return out
+    }
+
+    private static func substitute(_ input: String,
+                                   pattern: NSRegularExpression,
+                                   replace: (NSTextCheckingResult, String) -> String) -> String {
+        let ns = input as NSString
+        var result = ""
+        var cursor = 0
+        for match in pattern.matches(in: input, range: NSRange(location: 0, length: ns.length)) {
+            let r = match.range
+            result += ns.substring(with: NSRange(location: cursor, length: r.location - cursor))
+            result += replace(match, input)
+            cursor = r.location + r.length
+        }
+        result += ns.substring(from: cursor)
+        return result
+    }
+
+    /// Wrap URLSession with Slack's OAuth bearer header. Returns raw data + response
+    /// so callers can inspect 429s etc.
+    private static func slackGet(_ url: URL, token: String) async throws -> (Data, URLResponse) {
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return try await URLSession.shared.data(for: req)
     }
 }
 

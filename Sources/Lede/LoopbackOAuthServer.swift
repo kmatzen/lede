@@ -69,28 +69,20 @@ final class LoopbackOAuthServer {
     }
 
     /// Accept one connection, read its request line, write a response, return the parsed query.
-    func waitForCallback(timeoutSeconds: Int = 300) async throws -> CallbackResult {
+    /// Polls with `poll()` at 100ms intervals so we can react to:
+    ///   - `Task.isCancelled` (caller cancelled the operation)
+    ///   - `stop()` being called externally (socket closes → poll returns error)
+    ///   - overall timeout
+    func waitForCallback(timeoutSeconds: Int = 120) async throws -> CallbackResult {
         let fd = listenFd
         guard fd >= 0 else {
             throw NSError(domain: "LoopbackOAuth", code: -1,
                           userInfo: [NSLocalizedDescriptionKey: "server not started"])
         }
-
-        return try await withThrowingTaskGroup(of: CallbackResult.self) { group in
-            group.addTask {
-                try await Task.detached(priority: .userInitiated) {
-                    try Self.acceptAndParse(listenFd: fd)
-                }.value
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(timeoutSeconds) * 1_000_000_000)
-                throw NSError(domain: "LoopbackOAuth", code: -2,
-                              userInfo: [NSLocalizedDescriptionKey: "OAuth timeout"])
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
-        }
+        let deadline = Date().addingTimeInterval(Double(timeoutSeconds))
+        return try await Task.detached(priority: .userInitiated) {
+            try Self.acceptAndParse(listenFd: fd, deadline: deadline)
+        }.value
     }
 
     func stop() {
@@ -102,7 +94,27 @@ final class LoopbackOAuthServer {
 
     // MARK: - private
 
-    private static func acceptAndParse(listenFd: Int32) throws -> CallbackResult {
+    private static func acceptAndParse(listenFd: Int32, deadline: Date) throws -> CallbackResult {
+        // Wait for readability with cancellation-friendly polling.
+        while true {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            if Date() >= deadline {
+                throw NSError(domain: "LoopbackOAuth", code: -2,
+                              userInfo: [NSLocalizedDescriptionKey: "OAuth timeout"])
+            }
+            var pfd = pollfd(fd: listenFd, events: Int16(POLLIN), revents: 0)
+            let r = poll(&pfd, 1, 100)  // 100ms tick
+            if r < 0 {
+                if errno == EINTR { continue }
+                // listenFd was closed externally (stop()) → bail.
+                throw CancellationError()
+            }
+            if r == 0 { continue }  // no pending connection yet
+            break
+        }
+
         var clientAddr = sockaddr()
         var clientLen = socklen_t(MemoryLayout<sockaddr>.size)
         let clientFd = accept(listenFd, &clientAddr, &clientLen)
