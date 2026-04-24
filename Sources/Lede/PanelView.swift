@@ -15,6 +15,8 @@ struct PanelView: View {
         .background(.regularMaterial)
     }
 
+    @AppStorage(PinnedPanel.pinDefaultsKey) private var pinned = false
+
     private var header: some View {
         HStack(spacing: 8) {
             Image(systemName: "bell.badge")
@@ -28,10 +30,31 @@ struct PanelView: View {
             } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless)
                 .disabled(engine.isRefreshing)
+                .keyboardShortcut("r", modifiers: .command)
+                .help("Refresh now (⌘R)")
+                .accessibilityLabel("Refresh now")
+
+            Button {
+                pinned.toggle()
+                // Let the menu bar controller know so it can drop / reinstall
+                // the outside-click auto-hide without waiting for a reopen.
+                NotificationCenter.default.post(name: .ledePinStateChanged, object: nil)
+            } label: {
+                Image(systemName: pinned ? "pin.fill" : "pin")
+                    .foregroundStyle(pinned ? .orange : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("p", modifiers: .command)
+            .help(pinned ? "Unpin (⌘P)" : "Pin (⌘P)")
+            .accessibilityLabel(pinned ? "Unpin panel" : "Pin panel")
+
             Button {
                 onOpenSettings()
             } label: { Image(systemName: "gearshape") }
                 .buttonStyle(.borderless)
+                .keyboardShortcut(",", modifiers: .command)
+                .help("Settings (⌘,)")
+                .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

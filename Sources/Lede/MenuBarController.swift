@@ -1,5 +1,6 @@
 import Cocoa
 import SwiftUI
+import Combine
 
 @MainActor
 final class MenuBarController: NSObject, NSWindowDelegate {
@@ -17,32 +18,75 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         self.panel = PinnedPanel(rootView: view)
 
         super.init()
+        panel.delegate = self
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Lede")
             button.target = self
             button.action = #selector(togglePanel(_:))
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.imagePosition = .imageLeading
         }
+        updateBadge(digest: nil)
 
-        // Observe unread count to update menu bar title.
         engine.$digest
             .receive(on: RunLoop.main)
             .sink { [weak self] digest in
                 self?.updateBadge(digest: digest)
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .ledePinStateChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.onPinStateChanged()
+            }
+            .store(in: &cancellables)
     }
 
     private var cancellables = Set<AnyCancellableBox>()
+    private var outsideClickMonitor: Any?
 
+    // MARK: Badge
+
+    /// Menu-bar icon state keyed to the highest-priority tier present:
+    ///   critical (≥9) → red `bell.badge.fill`
+    ///   high (≥6)     → template `bell.badge`
+    ///   none          → plain template `bell`
+    /// Count text only appears when there's something worth showing.
     private func updateBadge(digest: Digest?) {
         guard let button = statusItem.button else { return }
-        let count = digest?.items.filter { $0.score >= 7 }.count ?? 0
-        button.title = count > 0 ? " \(count)" : ""
+        let items = digest?.items ?? []
+        let criticalCount = items.filter { $0.score >= 9 }.count
+        let highCount = items.filter { $0.score >= 6 }.count
+
+        let symbol: String
+        let tint: NSColor?
+        let title: String
+
+        if criticalCount > 0 {
+            symbol = "bell.badge.fill"
+            tint = .systemRed
+            title = " \(criticalCount)"
+        } else if highCount > 0 {
+            symbol = "bell.badge"
+            tint = nil
+            title = " \(highCount)"
+        } else {
+            symbol = "bell"
+            tint = nil
+            title = ""
+        }
+
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Lede")
+        // Template images pick up the menu bar's text color automatically. When
+        // we want our own color (critical red), turn off template.
+        image?.isTemplate = (tint == nil)
+        button.image = image
+        button.contentTintColor = tint
+        button.title = title
     }
 
-    private var outsideClickMonitor: Any?
+    // MARK: Toggle / show / hide
 
     @objc private func togglePanel(_ sender: NSStatusBarButton) {
         let event = NSApp.currentEvent
@@ -59,19 +103,31 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     private func showPanel(relativeTo button: NSStatusBarButton) {
-        guard let buttonWindow = button.window else { return }
-        let buttonFrame = buttonWindow.convertToScreen(button.frame)
-        let panelSize = panel.frame.size
-        let origin = NSPoint(
-            x: buttonFrame.midX - panelSize.width / 2,
-            y: buttonFrame.minY - panelSize.height - 6
-        )
-        panel.setFrameOrigin(origin)
+        if panel.isPinned, let saved = savedPanelOrigin() {
+            panel.setFrameOrigin(saved)
+        } else {
+            positionBelowButton(button)
+        }
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        installOutsideClickMonitor()
+        // Only auto-hide when the user hasn't pinned the panel. Pinned panels
+        // stay put across app-switches like a normal window.
+        if !panel.isPinned {
+            installOutsideClickMonitor()
+        }
         Task { await engine.refreshIfConfigured() }
+    }
+
+    private func positionBelowButton(_ button: NSStatusBarButton) {
+        guard let buttonWindow = button.window else { return }
+        let buttonFrame = buttonWindow.convertToScreen(button.frame)
+        let size = panel.frame.size
+        let origin = NSPoint(
+            x: buttonFrame.midX - size.width / 2,
+            y: buttonFrame.minY - size.height - 6
+        )
+        panel.setFrameOrigin(origin)
     }
 
     private func hidePanel() {
@@ -79,9 +135,49 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         removeOutsideClickMonitor()
     }
 
-    /// Global monitors only fire for events in OTHER applications — clicks on our
-    /// own status bar item or panel stay local and don't trigger this. So any
-    /// event we see here is by definition an "outside" click.
+    /// When a pinned panel's position changes, remember it so the next show
+    /// restores where the user dragged it.
+    nonisolated func windowDidMove(_ notification: Notification) {
+        Task { @MainActor [weak self] in
+            guard let self, let window = notification.object as? PinnedPanel, window === self.panel else { return }
+            if self.panel.isPinned {
+                self.savePanelOrigin(self.panel.frame.origin)
+            }
+        }
+    }
+
+    /// React to the pin state changing (published from PanelView's toggle).
+    func onPinStateChanged() {
+        if panel.isPinned {
+            // Pinning makes the panel behave like a regular window; drop the
+            // click-outside monitor so it stops auto-hiding.
+            removeOutsideClickMonitor()
+            // Seed the saved origin from the current position so subsequent
+            // windowDidMove updates are relative to where we started.
+            savePanelOrigin(panel.frame.origin)
+        } else {
+            // Unpinning + panel visible → reinstall the auto-hide.
+            if panel.isVisible {
+                installOutsideClickMonitor()
+            }
+        }
+    }
+
+    private func savedPanelOrigin() -> NSPoint? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "panel.originX") != nil else { return nil }
+        let x = defaults.double(forKey: "panel.originX")
+        let y = defaults.double(forKey: "panel.originY")
+        return NSPoint(x: x, y: y)
+    }
+
+    private func savePanelOrigin(_ origin: NSPoint) {
+        UserDefaults.standard.set(Double(origin.x), forKey: "panel.originX")
+        UserDefaults.standard.set(Double(origin.y), forKey: "panel.originY")
+    }
+
+    // MARK: Click-outside monitor
+
     private func installOutsideClickMonitor() {
         guard outsideClickMonitor == nil else { return }
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
@@ -97,6 +193,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             outsideClickMonitor = nil
         }
     }
+
+    // MARK: Right-click menu
 
     private func showMenu() {
         let menu = NSMenu()
@@ -123,8 +221,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 }
 
-// Lightweight Combine sink storage without importing Combine at top level elsewhere.
-import Combine
+// Lightweight Combine sink storage.
 final class AnyCancellableBox: Hashable {
     let inner: AnyCancellable
     init(_ c: AnyCancellable) { self.inner = c }
@@ -136,4 +233,8 @@ extension AnyCancellable {
     func store(in set: inout Set<AnyCancellableBox>) {
         set.insert(AnyCancellableBox(self))
     }
+}
+
+extension Notification.Name {
+    static let ledePinStateChanged = Notification.Name("lede.pin-state-changed")
 }

@@ -1,8 +1,19 @@
 import Cocoa
 import SwiftUI
 
-/// Borderless floating panel. We don't want a titlebar — SwiftUI draws the whole surface.
+/// Borderless floating panel.
+///   - Unpinned (default): popover — opens below the bell, hides on outside click.
+///   - Pinned: stays visible across app-switches, drag from any background point,
+///     position is remembered in UserDefaults.
+/// Pin state lives in UserDefaults so PanelView's Toggle and MenuBarController
+/// can both read it without passing objects around.
 final class PinnedPanel: NSPanel {
+    static let pinDefaultsKey = "panel.pinned"
+
+    var isPinned: Bool {
+        UserDefaults.standard.bool(forKey: Self.pinDefaultsKey)
+    }
+
     init<Content: View>(rootView: Content) {
         super.init(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 540),

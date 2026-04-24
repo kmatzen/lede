@@ -13,7 +13,7 @@ enum MicrosoftOAuth {
     static let tenant = "consumers"
 
     static let tokenHost = "https://login.microsoftonline.com"
-    static let scopes = "offline_access Mail.Read User.Read"
+    static let scopes = "offline_access Mail.Read Calendars.Read User.Read"
 
     private static var authorizeURL: URL {
         URL(string: "\(tokenHost)/\(tenant)/oauth2/v2.0/authorize")!

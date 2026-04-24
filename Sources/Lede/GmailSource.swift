@@ -18,7 +18,7 @@ enum GoogleOAuth {
 
     static let authorizeURL = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
     static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
-    static let scopes = "https://www.googleapis.com/auth/gmail.metadata"
+    static let scopes = "https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/calendar.readonly"
 
     struct Tokens: Codable {
         let access_token: String

@@ -10,8 +10,10 @@ actor Storage {
     private let cacheURL: URL
     private let digestURL: URL
     private let dismissedURL: URL
+    private let notifiedURL: URL
     private var triages: [String: ItemTriage] = [:]
     private var dismissed: Set<String> = []
+    private var notified: Set<String> = []
 
     init() throws {
         let fm = FileManager.default
@@ -22,6 +24,7 @@ actor Storage {
         self.cacheURL = dir.appendingPathComponent("triage_cache.json")
         self.digestURL = dir.appendingPathComponent("last_digest.json")
         self.dismissedURL = dir.appendingPathComponent("dismissed.json")
+        self.notifiedURL = dir.appendingPathComponent("notified.json")
 
         if let data = try? Data(contentsOf: cacheURL),
            let decoded = try? JSONDecoder.iso.decode([String: ItemTriage].self, from: data) {
@@ -30,6 +33,10 @@ actor Storage {
         if let data = try? Data(contentsOf: dismissedURL),
            let decoded = try? JSONDecoder.iso.decode([String].self, from: data) {
             self.dismissed = Set(decoded)
+        }
+        if let data = try? Data(contentsOf: notifiedURL),
+           let decoded = try? JSONDecoder.iso.decode([String].self, from: data) {
+            self.notified = Set(decoded)
         }
     }
 
@@ -79,6 +86,20 @@ actor Storage {
     private func saveDismissed() {
         guard let data = try? JSONEncoder.iso.encode(Array(dismissed)) else { return }
         try? data.write(to: dismissedURL, options: .atomic)
+    }
+
+    // MARK: - Notification de-dupe
+
+    func allNotified() -> Set<String> { notified }
+
+    func markNotified(_ hash: String) {
+        notified.insert(hash)
+        saveNotified()
+    }
+
+    private func saveNotified() {
+        guard let data = try? JSONEncoder.iso.encode(Array(notified)) else { return }
+        try? data.write(to: notifiedURL, options: .atomic)
     }
 
     private func save() {

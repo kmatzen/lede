@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Direct-distribution build (Developer ID + Hardened Runtime).
+        Not sandboxed; nothing else required for our network calls.
+
+        For the Mac App Store path, swap this for an entitlements file with:
+            com.apple.security.app-sandbox       = true
+            com.apple.security.network.client    = true
+            com.apple.security.network.server    = true   (loopback OAuth)
+            keychain-access-groups               = ["$(TeamIdentifierPrefix)com.lede.app"]
+    -->
+</dict>
+</plist>

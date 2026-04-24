@@ -215,7 +215,7 @@ private struct GmailPane: View {
     @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
-        section("Gmail") {
+        section("Google (Gmail + Calendar)") {
             if connected {
                 HStack {
                     Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
@@ -226,10 +226,10 @@ private struct GmailPane: View {
                     }
                 }
             } else {
-                Text("Browser will open to Google for approval. Lede only reads message headers + snippets — never message bodies.")
+                Text("Reads Gmail headers + snippets (never bodies) and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Connect Gmail") { task = Task { await connect() } }
+                    Button("Connect Google") { task = Task { await connect() } }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
                     if busy {
@@ -337,7 +337,7 @@ private struct OutlookPane: View {
     @State private var task: Task<Void, Never>? = nil
 
     var body: some View {
-        section("Outlook") {
+        section("Microsoft (Outlook + Calendar)") {
             if connected {
                 HStack {
                     Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
@@ -348,10 +348,10 @@ private struct OutlookPane: View {
                     }
                 }
             } else {
-                Text("Browser opens Microsoft sign-in. Lede reads unread inbox messages only (Mail.Read scope).")
+                Text("Reads Outlook unread mail and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Connect Outlook") { task = Task { await connect() } }
+                    Button("Connect Microsoft") { task = Task { await connect() } }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
                     if busy {
@@ -389,12 +389,22 @@ private struct OutlookPane: View {
 private struct AboutPane: View {
     let engine: CoreEngine
     @State private var dismissedCount: Int = 0
+    @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Lede 0.1").font(.title2).bold()
             Text("A pinned menu-bar digest that surfaces the most important items from your inboxes.")
                 .foregroundStyle(.secondary)
+
+            Toggle("Launch at login", isOn: $launchAtLogin)
+                .padding(.top, 6)
+                .onChange(of: launchAtLogin) { _, newValue in
+                    LaunchAtLogin.setEnabled(newValue)
+                    // Reflect what actually took (in case register failed).
+                    launchAtLogin = LaunchAtLogin.isEnabled
+                }
+
             Text("Token efficiency")
                 .font(.headline).padding(.top, 8)
             VStack(alignment: .leading, spacing: 4) {

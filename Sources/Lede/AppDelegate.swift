@@ -15,8 +15,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         })
         installEditMenu()
 
-        // Kick off an initial refresh if credentials exist.
+        // Kick off an initial refresh if credentials exist + start the
+        // 5-minute background refresh so the bell stays current.
         Task { await engine.refreshIfConfigured() }
+        engine.startBackgroundRefresh()
     }
 
     /// An `.accessory` app has no main menu by default, which means the standard

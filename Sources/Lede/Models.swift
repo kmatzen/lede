@@ -4,8 +4,9 @@ import CryptoKit
 enum Source: String, Codable, CaseIterable, Identifiable {
     case github
     case gmail
-    case slack   // stubbed
-    case outlook // stubbed
+    case slack
+    case outlook
+    case calendar
 
     var id: String { rawValue }
     var displayName: String {
@@ -14,6 +15,7 @@ enum Source: String, Codable, CaseIterable, Identifiable {
         case .gmail: return "Gmail"
         case .slack: return "Slack"
         case .outlook: return "Outlook"
+        case .calendar: return "Calendar"
         }
     }
 }

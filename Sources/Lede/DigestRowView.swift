@@ -52,6 +52,7 @@ struct DigestRowView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Dismiss")
+                .accessibilityLabel("Dismiss")
                 .opacity(hovering ? 1 : 0)
                 .animation(.easeInOut(duration: 0.12), value: hovering)
             }
@@ -76,6 +77,7 @@ struct DigestRowView: View {
         case .gmail: return "envelope"
         case .slack: return "number"
         case .outlook: return "envelope.badge"
+        case .calendar: return "calendar"
         }
     }
 

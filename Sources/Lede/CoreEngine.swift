@@ -10,10 +10,31 @@ final class CoreEngine: ObservableObject {
 
     private let storage: Storage
     private var minRefreshInterval: TimeInterval = 60
+    private var backgroundTimer: Timer?
 
     init(storage: Storage) {
         self.storage = storage
         Task { self.digest = await storage.loadLastDigest() }
+    }
+
+    // MARK: Background refresh
+
+    /// Fire `refreshIfConfigured` every `interval` seconds so the user gets
+    /// fresh triages without keeping the panel open. Throttle inside
+    /// `refreshIfConfigured` (minRefreshInterval) makes back-to-back calls cheap.
+    func startBackgroundRefresh(interval: TimeInterval = 300) {
+        backgroundTimer?.invalidate()
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refreshIfConfigured() }
+        }
+        // Run on common modes so it keeps firing while menus / popups are up.
+        RunLoop.main.add(timer, forMode: .common)
+        backgroundTimer = timer
+    }
+
+    func stopBackgroundRefresh() {
+        backgroundTimer?.invalidate()
+        backgroundTimer = nil
     }
 
     // MARK: Auth checks
@@ -33,8 +54,10 @@ final class CoreEngine: ObservableObject {
         let all: [NotificationSource] = [
             GitHubSource(),
             GmailSource(),
+            GoogleCalendarSource(),
             SlackSource(),
             OutlookSource(),
+            OutlookCalendarSource(),
         ]
         return all.filter { $0.isConfigured }
     }
@@ -142,6 +165,7 @@ final class CoreEngine: ObservableObject {
             self.digest = digest
             self.lastRefreshed = Date()
             Log.info("digest built: \(digest.items.count) item(s) visible")
+            await Notifier.notifyNewItems(digest.items, storage: storage)
             if !sourceErrors.isEmpty {
                 self.lastError = "Partial: " + sourceErrors.joined(separator: "; ")
             }
