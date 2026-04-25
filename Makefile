@@ -38,8 +38,8 @@ bundle: build
 	@# in SwiftPM's output and must be relocated into Contents/Frameworks.
 	@# SwiftPM-built binaries compile with @loader_path/lib only, so we add
 	@# the standard app-bundle rpath @executable_path/../Frameworks.
-	@if [ -d "$(BUILD_DIR)/Sparkle.framework" ]; then \
-	    cp -R "$(BUILD_DIR)/Sparkle.framework" "$(DEBUG_APP)/Contents/Frameworks/"; \
+	@if [ -d "$(DEBUG_DIR)/Sparkle.framework" ]; then \
+	    cp -R "$(DEBUG_DIR)/Sparkle.framework" "$(DEBUG_APP)/Contents/Frameworks/"; \
 	    install_name_tool -add_rpath "@executable_path/../Frameworks" \
 	        "$(DEBUG_APP)/Contents/MacOS/$(APP_NAME)" 2>/dev/null || true; \
 	fi

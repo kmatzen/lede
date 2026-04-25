@@ -78,7 +78,6 @@ actor Storage {
     func runMaintenance() {
         let now = Date()
         let triageTTL: TimeInterval = 30 * 86400
-        let notifiedTTL: TimeInterval = 30 * 86400
         let stateTTL: TimeInterval = 14 * 86400
 
         // Triages — drop entries older than 30 days.
