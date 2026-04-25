@@ -26,13 +26,18 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
             button.imagePosition = .imageLeading
         }
-        updateBadge(digest: nil)
+        updateBadge()
 
+        // Re-render the badge whenever any input changes — digest contents,
+        // refresh in-flight, snooze toggle, or pin state.
         engine.$digest
             .receive(on: RunLoop.main)
-            .sink { [weak self] digest in
-                self?.updateBadge(digest: digest)
-            }
+            .sink { [weak self] _ in self?.updateBadge() }
+            .store(in: &cancellables)
+
+        engine.$isRefreshing
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateBadge() }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: .ledePinStateChanged)
@@ -44,9 +49,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
         NotificationCenter.default.publisher(for: .ledeSnoozeChanged)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateBadge(digest: self?.engine.digest)
-            }
+            .sink { [weak self] _ in self?.updateBadge() }
             .store(in: &cancellables)
     }
 
@@ -55,45 +58,64 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     // MARK: Badge
 
-    /// Menu-bar icon state keyed to the highest-priority tier present:
-    ///   critical (≥9) → red `bell.badge.fill`
-    ///   high (≥6)     → template `bell.badge`
-    ///   none          → plain template `bell`
-    /// Count text only appears when there's something worth showing.
-    private func updateBadge(digest: Digest?) {
+    /// Menu-bar icon state, in priority order:
+    ///   refreshing      → orange bell (talking to Claude / fetching sources)
+    ///   snoozed         → `bell.slash`, no count
+    ///   critical (≥9)   → red `bell.badge.fill` + count
+    ///   high (≥6)       → template `bell.badge` + count
+    ///   medium/low (≥1) → template `bell.badge`, no count (subtle dot only)
+    ///   nothing         → plain template `bell`
+    /// Refresh wins over everything so the user always knows when network is
+    /// in flight; it flips back to the digest-derived state the moment the
+    /// engine sets isRefreshing=false.
+    private func updateBadge() {
         guard let button = statusItem.button else { return }
-        let snoozed = Snooze.isActive
-        let items = digest?.items ?? []
-        let criticalCount = items.filter { $0.score >= 9 }.count
-        let highCount = items.filter { $0.score >= 6 }.count
 
         let symbol: String
         let tint: NSColor?
         let title: String
 
-        if snoozed {
-            // Z-bell to indicate snooze. Stays template so it dims to gray
-            // alongside the menu bar's text color.
+        if engine.isRefreshing {
+            // Lede's brand orange = SwiftUI .orange ≈ NSColor.systemOrange.
+            // Same hue as the High-priority tier in the panel, so the user
+            // builds one mental association: "orange = working / important".
+            symbol = "bell"
+            tint = .systemOrange
+            title = ""
+        } else if Snooze.isActive {
+            // Z-bell. Stays template so it dims with menu bar text.
             symbol = "bell.slash"
             tint = nil
             title = ""
-        } else if criticalCount > 0 {
-            symbol = "bell.badge.fill"
-            tint = .systemRed
-            title = " \(criticalCount)"
-        } else if highCount > 0 {
-            symbol = "bell.badge"
-            tint = nil
-            title = " \(highCount)"
         } else {
-            symbol = "bell"
-            tint = nil
-            title = ""
+            let items = engine.digest?.items ?? []
+            let criticalCount = items.filter { $0.score >= 9 }.count
+            let highCount = items.filter { $0.score >= 6 }.count
+            if criticalCount > 0 {
+                symbol = "bell.badge.fill"
+                tint = .systemRed
+                title = " \(criticalCount)"
+            } else if highCount > 0 {
+                symbol = "bell.badge"
+                tint = nil
+                title = " \(highCount)"
+            } else if !items.isEmpty {
+                // Something to look at, but nothing urgent — show the dot
+                // without a count so the menu bar stays quiet.
+                symbol = "bell.badge"
+                tint = nil
+                title = ""
+            } else {
+                symbol = "bell"
+                tint = nil
+                title = ""
+            }
         }
 
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Lede")
-        // Template images pick up the menu bar's text color automatically. When
-        // we want our own color (critical red), turn off template.
+        // Template images pick up the menu bar's text color automatically.
+        // When we want our own color (critical red, refreshing orange), turn
+        // off template so contentTintColor takes effect.
         image?.isTemplate = (tint == nil)
         button.image = image
         button.contentTintColor = tint
