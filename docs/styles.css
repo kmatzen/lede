@@ -306,15 +306,6 @@ p { margin: 0 0 14px 0; }
 .source-name { font-weight: 600; font-size: 0.95rem; }
 .source-detail { color: var(--text-muted); font-size: 0.85rem; line-height: 1.45; }
 
-/* Privacy */
-
-.privacy-summary {
-    color: var(--text-muted);
-    font-size: 1.05rem;
-    max-width: 760px;
-    line-height: 1.65;
-}
-
 /* CTA */
 
 .section-cta { text-align: center; }
