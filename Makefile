@@ -30,17 +30,26 @@ build:
 
 bundle: build
 	@rm -rf "$(DEBUG_APP)"
-	@mkdir -p "$(DEBUG_APP)/Contents/MacOS" "$(DEBUG_APP)/Contents/Resources"
+	@mkdir -p "$(DEBUG_APP)/Contents/MacOS" "$(DEBUG_APP)/Contents/Resources" "$(DEBUG_APP)/Contents/Frameworks"
 	@cp "$(DEBUG_EXEC)" "$(DEBUG_APP)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/Info.plist "$(DEBUG_APP)/Contents/Info.plist"
 	@cp Resources/AppIcon.icns "$(DEBUG_APP)/Contents/Resources/AppIcon.icns" 2>/dev/null || true
+	@# Linked dynamic frameworks (Sparkle, etc.) live alongside the binary
+	@# in SwiftPM's output and must be relocated into Contents/Frameworks.
+	@# SwiftPM-built binaries compile with @loader_path/lib only, so we add
+	@# the standard app-bundle rpath @executable_path/../Frameworks.
+	@if [ -d "$(BUILD_DIR)/Sparkle.framework" ]; then \
+	    cp -R "$(BUILD_DIR)/Sparkle.framework" "$(DEBUG_APP)/Contents/Frameworks/"; \
+	    install_name_tool -add_rpath "@executable_path/../Frameworks" \
+	        "$(DEBUG_APP)/Contents/MacOS/$(APP_NAME)" 2>/dev/null || true; \
+	fi
 
 # Local dev sign — keeps Keychain Designated Requirement stable across rebuilds
 # (so "Always Allow" sticks). Hardened Runtime is enabled here too so the
 # signing flags match the release path; the only difference at release is the
 # universal binary + Developer ID identity.
 sign: bundle
-	@codesign --force \
+	@codesign --force --deep \
 	    --sign "$(IDENTITY)" \
 	    --options runtime \
 	    --entitlements $(ENTITLEMENTS) \
@@ -58,10 +67,15 @@ release:
 
 release-bundle: release
 	@rm -rf "$(RELEASE_APP)"
-	@mkdir -p "$(RELEASE_APP)/Contents/MacOS" "$(RELEASE_APP)/Contents/Resources"
+	@mkdir -p "$(RELEASE_APP)/Contents/MacOS" "$(RELEASE_APP)/Contents/Resources" "$(RELEASE_APP)/Contents/Frameworks"
 	@cp "$(RELEASE_EXEC)" "$(RELEASE_APP)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/Info.plist "$(RELEASE_APP)/Contents/Info.plist"
 	@cp Resources/AppIcon.icns "$(RELEASE_APP)/Contents/Resources/AppIcon.icns"
+	@if [ -d "$(RELEASE_DIR)/Sparkle.framework" ]; then \
+	    cp -R "$(RELEASE_DIR)/Sparkle.framework" "$(RELEASE_APP)/Contents/Frameworks/"; \
+	    install_name_tool -add_rpath "@executable_path/../Frameworks" \
+	        "$(RELEASE_APP)/Contents/MacOS/$(APP_NAME)" 2>/dev/null || true; \
+	fi
 
 release-sign: release-bundle
 	@if [ -z "$(RELEASE_IDENTITY)" ]; then \
