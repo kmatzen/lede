@@ -262,7 +262,7 @@ struct PriorityTier: Identifiable {
     ]
 }
 
-private struct TierSection: View {
+struct TierSection: View {
     let tier: PriorityTier
     let items: [Digest.Item]
     let onDismiss: (String) -> Void

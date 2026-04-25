@@ -152,83 +152,86 @@ p { margin: 0 0 14px 0; }
     margin-top: 16px;
 }
 
-/* Hero panel mockup --------------------------------------------------- */
+/* Hero panel screenshot ----------------------------------------------- */
 
-.panel {
-    background: linear-gradient(180deg, #16183f, #11132e);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 12px;
-    box-shadow:
-        0 30px 80px rgba(0, 0, 0, 0.55),
-        0 0 0 1px rgba(255, 255, 255, 0.02) inset;
-    width: 100%;
-    max-width: 420px;
-    margin-left: auto;
-}
-
-.panel-header {
+.hero-visual {
+    position: relative;
+    isolation: isolate;
+    min-height: 600px;
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 8px 12px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 10px;
-}
-.panel-bell { font-size: 1rem; }
-.panel-title { font-weight: 600; font-size: 0.92rem; }
-.panel-spacer { flex: 1; }
-.panel-button { color: var(--text-dim); font-size: 0.95rem; cursor: default; }
-
-.briefing {
-    background: rgba(139, 111, 255, 0.07);
-    border: 1px solid rgba(139, 111, 255, 0.18);
-    border-radius: 10px;
-    padding: 10px 12px;
-    margin-bottom: 10px;
-}
-.briefing-label { color: var(--accent); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; font-weight: 600; }
-.briefing-text { color: var(--text); font-size: 0.85rem; line-height: 1.45; }
-
-.tier { margin-bottom: 8px; }
-.tier-header {
-    color: var(--text-muted);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    font-weight: 600;
-    padding: 4px 6px;
-    margin-bottom: 4px;
-}
-
-.row {
-    display: flex;
-    gap: 10px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 9px;
-    padding: 8px 10px;
-    margin-bottom: 5px;
-}
-
-.pill {
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.72rem;
-    font-weight: 700;
-    font-feature-settings: "tnum";
 }
-.pill-critical { background: rgba(255, 91, 120, 0.18); color: var(--critical); }
-.pill-high     { background: rgba(255, 168, 77, 0.18); color: var(--warning); }
 
-.row-body { flex: 1; min-width: 0; }
-.row-meta { color: var(--text-dim); font-size: 0.7rem; margin-bottom: 2px; }
-.row-summary { color: var(--text); font-size: 0.85rem; line-height: 1.4; }
-.row-reason { color: var(--text-muted); font-size: 0.72rem; font-style: italic; margin-top: 2px; }
+/* Two soft aurora blobs behind the screenshot — purple top-right, cyan
+   bottom-left. Drift slowly so the hero feels alive without being jumpy. */
+.hero-visual::before,
+.hero-visual::after {
+    content: '';
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(70px);
+    z-index: -1;
+    pointer-events: none;
+    will-change: transform;
+}
+.hero-visual::before {
+    width: 320px; height: 320px;
+    top: 5%; right: 8%;
+    background: radial-gradient(circle, rgba(139, 111, 255, 0.55), transparent 70%);
+    animation: drift-a 11s ease-in-out infinite;
+}
+.hero-visual::after {
+    width: 260px; height: 260px;
+    bottom: 6%; left: 4%;
+    background: radial-gradient(circle, rgba(79, 214, 232, 0.42), transparent 70%);
+    animation: drift-b 13s ease-in-out infinite;
+}
+
+.panel-shot {
+    width: 100%;
+    max-width: 420px;
+    height: auto;
+    display: block;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    box-shadow:
+        0 35px 80px rgba(0, 0, 0, 0.55),
+        0 12px 28px rgba(139, 111, 255, 0.18),
+        0 0 0 1px rgba(255, 255, 255, 0.04);
+    transform-origin: center;
+    animation: float 7s ease-in-out infinite;
+    transition: transform 0.4s ease, box-shadow 0.4s ease;
+}
+
+/* Hover gives a small lift + a brighter purple halo, telegraphing it's a
+   real product preview rather than decoration. */
+.panel-shot:hover {
+    transform: translateY(-6px) scale(1.01);
+    box-shadow:
+        0 45px 100px rgba(0, 0, 0, 0.6),
+        0 16px 36px rgba(139, 111, 255, 0.32),
+        0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+@keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-7px); }
+}
+@keyframes drift-a {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(-25px, 20px) scale(1.08); }
+}
+@keyframes drift-b {
+    0%, 100% { transform: translate(0, 0) scale(1); }
+    50%      { transform: translate(20px, -18px) scale(1.05); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .panel-shot,
+    .hero-visual::before,
+    .hero-visual::after { animation: none; }
+}
 
 /* Sections ------------------------------------------------------------ */
 
@@ -250,7 +253,18 @@ p { margin: 0 0 14px 0; }
     border-radius: var(--radius);
     padding: 22px;
 }
-.feature-icon { font-size: 1.6rem; margin-bottom: 8px; }
+.feature-icon {
+    width: 38px; height: 38px;
+    margin-bottom: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    background: rgba(139, 111, 255, 0.10);
+    border: 1px solid rgba(139, 111, 255, 0.22);
+    border-radius: 9px;
+}
+.feature-icon svg { width: 20px; height: 20px; }
 .feature p { color: var(--text-muted); margin-bottom: 0; font-size: 0.95rem; }
 
 /* Sources */
@@ -271,12 +285,19 @@ p { margin: 0 0 14px 0; }
     gap: 6px;
 }
 .source-icon {
-    width: 36px; height: 36px;
-    background: linear-gradient(180deg, var(--accent), #6948e8);
-    border-radius: 8px;
+    width: 38px; height: 38px;
+    border-radius: 9px;
     display: flex; align-items: center; justify-content: center;
-    color: #fff; font-weight: 700; margin-bottom: 4px;
+    margin-bottom: 4px;
 }
+.source-icon svg { width: 22px; height: 22px; }
+
+/* Brand-tinted backgrounds — keyed to each provider's primary color but
+   muted so the cards stay coherent with the dark theme. */
+.source-icon-google    { color: #ea4335; background: rgba(234, 67, 53, 0.12);   border: 1px solid rgba(234, 67, 53, 0.28); }
+.source-icon-microsoft { color: #0078d4; background: rgba(0, 120, 212, 0.14);   border: 1px solid rgba(0, 120, 212, 0.30); }
+.source-icon-slack     { color: #ecb22e; background: rgba(236, 178, 46, 0.14);  border: 1px solid rgba(236, 178, 46, 0.30); }
+.source-icon-github    { color: #f5f5f7; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.18); }
 .source-name { font-weight: 600; font-size: 0.95rem; }
 .source-detail { color: var(--text-muted); font-size: 0.85rem; line-height: 1.45; }
 

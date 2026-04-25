@@ -18,7 +18,7 @@ IDENTITY = $(shell ./scripts/setup-dev-cert.sh)
 RELEASE_IDENTITY = $(shell security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Developer ID Application/ { print $$2; exit }')
 
-.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize dmg
+.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize dmg screenshot
 
 VERSION ?= 0.1
 DMG := $(RELEASE_DIR)/Lede-$(VERSION).dmg
@@ -125,6 +125,12 @@ dmg: notarize
 clean:
 	swift package clean
 	rm -rf "$(DEBUG_APP)" "$(RELEASE_APP)"
+
+# Render PanelView with curated mock data and write a PNG for the website.
+# Re-run anytime the panel design changes.
+screenshot: build
+	@$(DEBUG_EXEC) --screenshot docs/assets/panel.png
+	@echo "  Re-run after design changes to refresh the website hero image."
 
 reset-cert:
 	@for sha in $$(security find-certificate -a -c "Lede Dev" -Z ~/Library/Keychains/login.keychain-db 2>/dev/null | awk '/SHA-1 hash:/ {print $$3}'); do \

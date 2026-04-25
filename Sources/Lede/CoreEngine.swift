@@ -14,13 +14,15 @@ final class CoreEngine: ObservableObject {
     private var minRefreshInterval: TimeInterval = 60
     private var backgroundTimer: Timer?
 
-    init(storage: Storage) {
+    init(storage: Storage, autoload: Bool = true) {
         self.storage = storage
-        Task {
-            self.digest = await storage.loadLastDigest()
-            self.sourceStates = await storage.allSourceStates()
-            self.usage = await storage.currentUsage()
-            await storage.runMaintenance()
+        if autoload {
+            Task {
+                self.digest = await storage.loadLastDigest()
+                self.sourceStates = await storage.allSourceStates()
+                self.usage = await storage.currentUsage()
+                await storage.runMaintenance()
+            }
         }
     }
 
