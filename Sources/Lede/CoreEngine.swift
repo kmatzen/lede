@@ -43,11 +43,12 @@ final class CoreEngine: ObservableObject {
         let chosen = interval ?? configuredRefreshInterval()
         guard let chosen, chosen > 0 else { return }
         let timer = Timer(timeInterval: chosen, repeats: true) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
                 if Schedule.inQuietHours() && !Snooze.isActive {
                     Snooze.snooze(for: 60 * 60)  // re-arm every hour while quiet
                 }
-                await self?.refreshIfConfigured()
+                await self.refreshIfConfigured()
             }
         }
         // Run on common modes so it keeps firing while menus / popups are up.

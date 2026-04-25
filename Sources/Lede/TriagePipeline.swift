@@ -151,7 +151,8 @@ struct TriagePipeline {
         let currentHashes = Set(digestItems.map { $0.contentHash })
         let stickyTTL: TimeInterval = 24 * 3600
         let now = Date()
-        if let previous = await storage.loadLastDigest() {
+        let previous = await storage.loadLastDigest()
+        if let previous = previous {
             for old in previous.items where !currentHashes.contains(old.contentHash) {
                 if now.timeIntervalSince(old.receivedAt) < stickyTTL {
                     digestItems.append(old)
@@ -174,10 +175,20 @@ struct TriagePipeline {
         }
 
         // Synthesis over top 8 — only if the top item is actually interesting.
+        // Reuse the previous digest's synthesis when the top-8 hash list is
+        // identical: refresh runs every 5 min, but the top items rarely shift,
+        // and Sonnet calls eat into the user's Claude subscription window fast.
         var synthesis: String? = nil
         let topN = Array(digestItems.prefix(8))
         if let first = topN.first, first.score >= 6, topN.count >= 2 {
-            synthesis = try? await synthesize(topN)
+            let fingerprint = topN.map(\.contentHash).joined(separator: "|")
+            let prevFingerprint = previous?.items.prefix(8).map(\.contentHash).joined(separator: "|")
+            if let cached = previous?.synthesis, prevFingerprint == fingerprint {
+                synthesis = cached
+                Log.info("triage: synthesis cache hit (top-8 unchanged)")
+            } else {
+                synthesis = try? await synthesize(topN)
+            }
         }
 
         let digest = Digest(generatedAt: Date(), items: digestItems, synthesis: synthesis)

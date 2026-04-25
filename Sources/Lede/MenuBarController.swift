@@ -203,7 +203,8 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            Task { @MainActor in self?.hidePanel() }
+            guard let self else { return }
+            Task { @MainActor in self.hidePanel() }
         }
     }
 
