@@ -678,22 +678,52 @@ private func section<Content: View>(_ title: String, @ViewBuilder content: () ->
     }
 }
 
-/// Rough $ estimate using Haiku 4.5 pricing (where most calls go).
-/// Sonnet synthesis is ~5x more expensive but contributes a small share.
-/// Numbers from anthropic.com/pricing as of April 2026.
-private func estimatedCost(_ u: UsageTotals) -> String {
-    let inPrice = 1.00 / 1_000_000.0       // Haiku 4.5 input ($/token)
-    let outPrice = 5.00 / 1_000_000.0      // Haiku 4.5 output
-    let cacheReadPrice = 0.10 / 1_000_000.0
-    let cacheWritePrice = 1.25 / 1_000_000.0
-    let dollars = Double(u.inputTokens) * inPrice
-        + Double(u.outputTokens) * outPrice
-        + Double(u.cacheReads) * cacheReadPrice
-        + Double(u.cacheWrites) * cacheWritePrice
-    if dollars < 0.01 {
-        return "Estimated cost: <$0.01 (Haiku rates)"
+/// Per-million-token prices from anthropic.com/pricing as of April 2026.
+/// Unknown models fall through to Haiku rates (the cheaper guess).
+private struct ModelRates {
+    let input: Double
+    let output: Double
+    let cacheRead: Double
+    let cacheWrite: Double
+
+    func cost(_ u: ModelUsage) -> Double {
+        Double(u.inputTokens) * input
+            + Double(u.outputTokens) * output
+            + Double(u.cacheReads) * cacheRead
+            + Double(u.cacheWrites) * cacheWrite
     }
-    return String(format: "Estimated cost: $%.2f (Haiku rates, Sonnet synthesis adds ~10%%)", dollars)
+}
+
+private func ratesFor(model: String) -> ModelRates {
+    if model.contains("sonnet") {
+        return ModelRates(input: 3.00 / 1e6, output: 15.00 / 1e6,
+                          cacheRead: 0.30 / 1e6, cacheWrite: 3.75 / 1e6)
+    }
+    if model.contains("opus") {
+        return ModelRates(input: 15.00 / 1e6, output: 75.00 / 1e6,
+                          cacheRead: 1.50 / 1e6, cacheWrite: 18.75 / 1e6)
+    }
+    // Haiku — and the safe fallback.
+    return ModelRates(input: 1.00 / 1e6, output: 5.00 / 1e6,
+                      cacheRead: 0.10 / 1e6, cacheWrite: 1.25 / 1e6)
+}
+
+private func estimatedCost(_ u: UsageTotals) -> String {
+    var dollars: Double = 0
+    for (model, usage) in u.byModel {
+        dollars += ratesFor(model: model).cost(usage)
+    }
+    // Account for legacy flat counters (data from before per-model tracking).
+    let legacy = ModelUsage(
+        inputTokens: u.inputTokens, outputTokens: u.outputTokens,
+        cacheReads: u.cacheReads, cacheWrites: u.cacheWrites
+    )
+    dollars += ratesFor(model: "haiku").cost(legacy)
+
+    if dollars < 0.01 {
+        return "Less than $0.01 used this month."
+    }
+    return String(format: "About $%.2f used this month.", dollars)
 }
 
 /// Slack app manifest — pasted by the user during setup. Embedded so we can

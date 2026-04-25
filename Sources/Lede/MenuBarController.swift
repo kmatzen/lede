@@ -116,6 +116,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// Programmatic panel-open, used on first launch from AppDelegate.
+    func openPanelOnLaunch() {
+        guard let button = statusItem.button else { return }
+        showPanel(relativeTo: button)
+    }
+
     private func showPanel(relativeTo button: NSStatusBarButton) {
         if panel.isPinned, let saved = savedPanelOrigin() {
             panel.setFrameOrigin(saved)

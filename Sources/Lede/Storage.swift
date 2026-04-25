@@ -178,15 +178,17 @@ actor Storage {
 
     /// Add to the running total. Resets the counter when the calendar month
     /// rolls over so users see "this month" not "since install".
-    func addUsage(input: Int, output: Int, cacheReads: Int, cacheWrites: Int) {
+    func addUsage(model: String, input: Int, output: Int, cacheReads: Int, cacheWrites: Int) {
         let key = monthKey()
         if usage.monthKey != key {
             usage = UsageTotals(monthKey: key)
         }
-        usage.inputTokens += input
-        usage.outputTokens += output
-        usage.cacheReads += cacheReads
-        usage.cacheWrites += cacheWrites
+        var entry = usage.byModel[model] ?? ModelUsage()
+        entry.inputTokens += input
+        entry.outputTokens += output
+        entry.cacheReads += cacheReads
+        entry.cacheWrites += cacheWrites
+        usage.byModel[model] = entry
         if let data = try? JSONEncoder.iso.encode(usage) {
             try? data.write(to: usageURL, options: .atomic)
         }

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Crash + Keychain migration before anything else creates state.
         CrashHandler.install()
         KeychainMigration.runIfNeeded()
+        Notifier.registerDelegate()
 
         let storage = Storage.shared
         engine = CoreEngine(storage: storage)
@@ -19,11 +20,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         })
         installEditMenu()
 
-        // First-run: if nothing is configured yet, surface Settings so the
-        // user isn't staring at an empty bell wondering what to do.
+        // First-run: if nothing is configured yet, pop the panel itself so the
+        // user sees the Welcome step list — friendlier than dropping them in
+        // a tab list with no context.
         if !engine.hasClaudeCreds() || !engine.hasAnySource() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                self?.openSettings()
+                self?.menuBar.openPanelOnLaunch()
             }
         }
 

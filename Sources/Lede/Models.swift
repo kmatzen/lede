@@ -73,14 +73,25 @@ struct SourceState: Codable, Equatable {
     var lastError: String?
 }
 
-/// Running tally of Anthropic API token usage. Cheap to maintain (we just
-/// add up Usage from each /v1/messages response) and useful for cost
-/// transparency in About.
-struct UsageTotals: Codable, Equatable {
+/// Token totals keyed by model — different prices, different rates.
+struct ModelUsage: Codable, Equatable {
     var inputTokens: Int = 0
     var outputTokens: Int = 0
     var cacheReads: Int = 0
     var cacheWrites: Int = 0
+}
+
+/// Running tally of Anthropic API token usage, broken out per model so we
+/// can apply the right pricing. Resets at the start of each calendar month.
+struct UsageTotals: Codable, Equatable {
+    /// Legacy flat counters — kept so existing usage.json files decode.
+    /// Treated as Haiku-tier when computing totals.
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
+    var cacheReads: Int = 0
+    var cacheWrites: Int = 0
+    /// Per-model breakdown (keys are model IDs like "claude-haiku-4-5").
+    var byModel: [String: ModelUsage] = [:]
     /// Calendar month boundary the totals reset on. Format "yyyy-MM".
     var monthKey: String = ""
 }

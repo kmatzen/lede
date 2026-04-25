@@ -65,13 +65,57 @@ struct PanelView: View {
         if let digest = engine.digest, !digest.items.isEmpty {
             digestList(digest)
         } else if engine.isRefreshing {
-            centered { Text("Refreshing…").foregroundStyle(.secondary) }
+            centered {
+                ProgressView().controlSize(.small)
+                Text("Catching up…").foregroundStyle(.secondary).padding(.top, 4)
+            }
         } else if let err = engine.lastError {
             errorView(err)
         } else if !engine.hasClaudeCreds() || !engine.hasAnySource() {
             unconfigured
         } else {
-            centered { Text("No notifications.").foregroundStyle(.secondary) }
+            caughtUp
+        }
+    }
+
+    /// Replaces the bare "No notifications." text. If sources have run at
+    /// least once and returned 0 unread, the user is genuinely caught up,
+    /// which is a small win worth marking as such.
+    private var caughtUp: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 32))
+                .foregroundStyle(.green.opacity(0.7))
+            Text("You're caught up.")
+                .font(.system(size: 14, weight: .semibold))
+            if let last = engine.lastRefreshed {
+                Text("Last checked \(last, style: .relative) ago")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+            Spacer()
+            sourceCountsLine
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// One-line digest of how each source is doing — visible only in the
+    /// caught-up state, where the user might wonder "did anything actually run?"
+    @ViewBuilder
+    private var sourceCountsLine: some View {
+        let connected = Source.allCases.filter { engine.sourceStates[$0]?.lastFetchedAt != nil }
+        if !connected.isEmpty {
+            HStack(spacing: 10) {
+                ForEach(connected) { source in
+                    let state = engine.sourceStates[source]
+                    HStack(spacing: 3) {
+                        Text(source.displayName).foregroundStyle(.secondary)
+                        Text("\(state?.lastItemCount ?? 0)").foregroundStyle(.tertiary).monospacedDigit()
+                    }
+                }
+            }
+            .font(.caption2)
+            .padding(.bottom, 12)
         }
     }
 
@@ -90,6 +134,7 @@ struct PanelView: View {
                 footer(d)
             }
             .padding(10)
+            .animation(.easeInOut(duration: 0.18), value: d.items.map(\.contentHash))
         }
     }
 
@@ -136,17 +181,66 @@ struct PanelView: View {
     }
 
     private var unconfigured: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Welcome").font(.title3).bold()
-            Text("Connect at least one notification source and set up Claude to start.")
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Welcome to Lede")
+                .font(.title2).bold()
+            Text("Lede watches your inboxes and pulls the few things that actually need your attention to the top.")
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 10) {
+                stepRow(
+                    number: 1,
+                    done: engine.hasClaudeCreds(),
+                    title: "Connect Claude",
+                    detail: "So Lede can score and summarize your messages."
+                )
+                stepRow(
+                    number: 2,
+                    done: engine.hasAnySource(),
+                    title: "Connect at least one source",
+                    detail: "Gmail, GitHub, Slack, or Outlook."
+                )
+                stepRow(
+                    number: 3,
+                    done: false,
+                    title: "Click the bell anytime",
+                    detail: "Items show up here, ranked by what to look at first."
+                )
+            }
+            .padding(.vertical, 6)
+
             Button("Open Settings") { onOpenSettings() }
                 .buttonStyle(.borderedProminent)
             Spacer()
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func stepRow(number: Int, done: Bool, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(done ? Color.green : Color.secondary.opacity(0.15))
+                    .frame(width: 22, height: 22)
+                if done {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                } else {
+                    Text("\(number)")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 
@@ -212,6 +306,10 @@ private struct TierSection: View {
                 VStack(spacing: 6) {
                     ForEach(items) { item in
                         DigestRowView(item: item, onDismiss: { onDismiss(item.contentHash) })
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .move(edge: .top)),
+                                removal: .opacity.combined(with: .scale(scale: 0.98))
+                            ))
                     }
                 }
                 .padding(.leading, 2)

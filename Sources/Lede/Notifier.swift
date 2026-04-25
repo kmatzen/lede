@@ -1,5 +1,6 @@
 import Foundation
 import UserNotifications
+import AppKit
 
 /// Posts a macOS Notification Center banner the first time we see a
 /// high-priority item. Each item is notified at most once (tracked by
@@ -10,6 +11,11 @@ import UserNotifications
 ///   score >= 7 → notify silently (or skip — keep it bounded)
 enum Notifier {
     private static var didRequestAuth = false
+    private static let delegate = NotifierDelegate()
+
+    static func registerDelegate() {
+        UNUserNotificationCenter.current().delegate = delegate
+    }
 
     static func requestAuthIfNeeded() async {
         guard !didRequestAuth else { return }
@@ -55,5 +61,31 @@ enum Notifier {
             await storage.markNotified(item.contentHash)
             Log.info("notified \(item.source.rawValue) score=\(item.score) hash=\(item.contentHash.prefix(8))")
         }
+    }
+}
+
+/// Handles user interaction with our banners. The only behavior we care
+/// about today is "click → open the source URL embedded in userInfo."
+private final class NotifierDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        if let urlString = response.notification.request.content.userInfo["url"] as? String,
+           let url = URL(string: urlString) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Show banners even when Lede is foregrounded (a click on the bell
+    /// briefly activates the app; we still want notifications to surface).
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
     }
 }
