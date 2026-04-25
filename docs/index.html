@@ -3,15 +3,64 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Lede — your inboxes, ranked</title>
-    <meta name="description" content="A macOS menu-bar app that watches Gmail, GitHub, Slack, Outlook, and Calendar and surfaces the few things that actually matter.">
-    <link rel="icon" type="image/png" href="assets/icon.png">
-    <link rel="apple-touch-icon" href="assets/icon.png">
-    <link rel="stylesheet" href="styles.css">
-    <meta property="og:title" content="Lede — your inboxes, ranked">
-    <meta property="og:description" content="A macOS menu-bar app that watches your inboxes and surfaces the few things that actually matter.">
-    <meta property="og:image" content="assets/icon.png">
+    <title>Lede — Inbox triage for macOS, powered by Claude</title>
+    <meta name="description" content="A macOS menu-bar app that watches Gmail, GitHub, Slack, Outlook, and Calendar and uses Claude to surface the few items that actually need your attention.">
+    <meta name="author" content="Kevin Blackburn-Matzen">
+    <meta name="keywords" content="macOS, menu bar, inbox triage, notifications, Claude, AI, Gmail, GitHub, Slack, Outlook, productivity">
     <meta name="theme-color" content="#0d0d24">
+    <meta name="color-scheme" content="dark light">
+
+    <link rel="canonical" href="https://kmatzen.com/lede/">
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+
+    <!-- OpenGraph -->
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://kmatzen.com/lede/">
+    <meta property="og:title" content="Lede — Inbox triage for macOS, powered by Claude">
+    <meta property="og:description" content="A macOS menu-bar app that watches your inboxes and surfaces the few items that actually need your attention.">
+    <meta property="og:image" content="https://kmatzen.com/lede/assets/og-image.png">
+    <meta property="og:image:width" content="512">
+    <meta property="og:image:height" content="512">
+    <meta property="og:locale" content="en_US">
+    <meta property="og:site_name" content="Lede">
+
+    <!-- Twitter / X card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Lede — Inbox triage for macOS, powered by Claude">
+    <meta name="twitter:description" content="A macOS menu-bar app that watches your inboxes and surfaces what actually matters.">
+    <meta name="twitter:image" content="https://kmatzen.com/lede/assets/og-image.png">
+
+    <link rel="stylesheet" href="styles.css">
+
+    <!-- Structured data for rich results -->
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Lede",
+        "url": "https://kmatzen.com/lede/",
+        "image": "https://kmatzen.com/lede/assets/og-image.png",
+        "description": "A macOS menu-bar app that watches Gmail, GitHub, Slack, Outlook, and Calendar and uses Claude to surface the items that need your attention.",
+        "applicationCategory": "ProductivityApplication",
+        "operatingSystem": "macOS 14+",
+        "softwareVersion": "0.1.1",
+        "downloadUrl": "https://github.com/kmatzen/lede/releases/latest",
+        "author": {
+            "@type": "Person",
+            "name": "Kevin Blackburn-Matzen"
+        },
+        "license": "https://github.com/kmatzen/lede/blob/main/LICENSE",
+        "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+        }
+    }
+    </script>
 </head>
 <body>
 
@@ -107,22 +156,20 @@
             </div>
             <div class="source-card">
                 <div class="source-icon source-icon-microsoft" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <rect width="20" height="16" x="2" y="4" rx="2"/>
-                        <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
-                    </svg>
+                    <!-- Outlook 2018+ mark, via Wikimedia Commons. Trademark Microsoft. -->
+                    <img src="assets/icons/outlook.svg" alt="" width="22" height="22">
                 </div>
                 <div class="source-name">Microsoft</div>
                 <div class="source-detail">Unread Outlook mail and upcoming Outlook calendar events.</div>
             </div>
             <div class="source-card">
                 <div class="source-icon source-icon-slack" aria-hidden="true">
-                    <!-- Lucide hash — generic but reliable; Slack's brand mark is multi-color and reads poorly mono-tinted. -->
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                        <line x1="4" x2="20" y1="9" y2="9"/>
-                        <line x1="4" x2="20" y1="15" y2="15"/>
-                        <line x1="10" x2="8" y1="3" y2="21"/>
-                        <line x1="16" x2="14" y1="3" y2="21"/>
+                    <!-- Slack mark, Devicon (MIT) — official 4-color hash. -->
+                    <svg viewBox="0 0 128 128" role="img"><title>Slack</title>
+                        <path d="M27.255 80.719c0 7.33-5.978 13.317-13.309 13.317C6.616 94.036.63 88.049.63 80.719s5.987-13.317 13.317-13.317h13.309zm6.709 0c0-7.33 5.987-13.317 13.317-13.317s13.317 5.986 13.317 13.317v33.335c0 7.33-5.986 13.317-13.317 13.317-7.33 0-13.317-5.987-13.317-13.317zm0 0" fill="#de1c59"/>
+                        <path d="M47.281 27.255c-7.33 0-13.317-5.978-13.317-13.309C33.964 6.616 39.951.63 47.281.63s13.317 5.987 13.317 13.317v13.309zm0 6.709c7.33 0 13.317 5.987 13.317 13.317s-5.986 13.317-13.317 13.317H13.946C6.616 60.598.63 54.612.63 47.281c0-7.33 5.987-13.317 13.317-13.317zm0 0" fill="#35c5f0"/>
+                        <path d="M100.745 47.281c0-7.33 5.978-13.317 13.309-13.317 7.33 0 13.317 5.987 13.317 13.317s-5.987 13.317-13.317 13.317h-13.309zm-6.709 0c0 7.33-5.987 13.317-13.317 13.317s-13.317-5.986-13.317-13.317V13.946C67.402 6.616 73.388.63 80.719.63c7.33 0 13.317 5.987 13.317 13.317zm0 0" fill="#2eb57d"/>
+                        <path d="M80.719 100.745c7.33 0 13.317 5.978 13.317 13.309 0 7.33-5.987 13.317-13.317 13.317s-13.317-5.987-13.317-13.317v-13.309zm0-6.709c-7.33 0-13.317-5.987-13.317-13.317s5.986-13.317 13.317-13.317h33.335c7.33 0 13.317 5.986 13.317 13.317 0 7.33-5.987 13.317-13.317 13.317zm0 0" fill="#ebb02e"/>
                     </svg>
                 </div>
                 <div class="source-name">Slack</div>
@@ -157,7 +204,7 @@
             <a class="btn btn-primary" href="https://github.com/kmatzen/lede/releases/latest/download/Lede-0.1.1.dmg">Download Lede 0.1.1</a>
             <a class="btn btn-ghost" href="https://github.com/kmatzen/lede/releases">All releases</a>
         </div>
-        <p class="meta">macOS 14 Sonoma or later. Notarized + signed; opens without warnings.</p>
+        <p class="meta">macOS 14 Sonoma or later. Free and open source.</p>
     </div>
 </section>
 
@@ -166,6 +213,7 @@
         <div class="footer-brand">
             <img src="assets/icon.png" alt="" width="24" height="24">
             <span>Lede</span>
+            <span class="footer-copyright">© 2026 Kevin Blackburn-Matzen</span>
         </div>
         <nav class="footer-nav">
             <a href="https://github.com/kmatzen/lede">Source</a>

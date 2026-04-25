@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Sparkle appcast for Lede. Each <item> describes one release and is
+    discovered by the in-app updater via SUFeedURL in Info.plist.
+
+    Per-release authoring:
+      1.  make dmg VERSION=X.Y.Z
+      2.  sign_update .build/apple/Products/Release/Lede-X.Y.Z.dmg
+          → produces sparkle:edSignature + length attributes
+      3.  Append a new <item> at the top of <channel> with the values above
+      4.  Upload the .dmg to a GitHub release at tag vX.Y.Z
+      5.  git push (Pages serves this file)
+
+    Notes
+      - sparkle:edSignature is over the .dmg bytes, signed with the EdDSA
+        private key in Keychain (service https://sparkle-project.org).
+      - sparkle:version is treated as the comparison key by Sparkle; keep it
+        monotonically increasing. We use the same value for shortVersionString
+        and version since we don't have separate marketing/build numbers.
+-->
+<rss version="2.0"
+     xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
+     xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Lede</title>
+        <link>https://kmatzen.com/lede/appcast.xml</link>
+        <description>Auto-update feed for Lede.</description>
+        <language>en</language>
+
+        <!-- No releases here yet. The first auto-updateable release will be
+             v0.1.2 (v0.1.1 shipped before SUPublicEDKey was wired up).
+             Add a populated <item> when you cut it. -->
+    </channel>
+</rss>

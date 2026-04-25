@@ -18,10 +18,11 @@ IDENTITY = $(shell ./scripts/setup-dev-cert.sh)
 RELEASE_IDENTITY = $(shell security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Developer ID Application/ { print $$2; exit }')
 
-.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize dmg screenshot
+.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize dmg screenshot sparkle-sign
 
 VERSION ?= 0.1
 DMG := $(RELEASE_DIR)/Lede-$(VERSION).dmg
+SPARKLE_BIN := .build/artifacts/sparkle/Sparkle/bin
 
 all: run
 
@@ -125,6 +126,25 @@ dmg: notarize
 clean:
 	swift package clean
 	rm -rf "$(DEBUG_APP)" "$(RELEASE_APP)"
+
+# Sign the produced .dmg with Sparkle's EdDSA private key (in Keychain) and
+# print the appcast attributes you need to paste into docs/appcast.xml.
+# Requires `make dmg VERSION=...` to have already run.
+sparkle-sign:
+	@if [ ! -x "$(SPARKLE_BIN)/sign_update" ]; then \
+	    echo "error: $(SPARKLE_BIN)/sign_update missing — run 'swift build' once first"; \
+	    exit 1; \
+	fi
+	@if [ ! -f "$(DMG)" ]; then \
+	    echo "error: $(DMG) not found — build it first with 'make dmg VERSION=$(VERSION)'"; \
+	    exit 1; \
+	fi
+	@echo "  ✓ Signing $(DMG) with Sparkle EdDSA key…"
+	@echo "  Append this <enclosure> to docs/appcast.xml:"
+	@echo
+	@$(SPARKLE_BIN)/sign_update "$(DMG)"
+	@echo
+	@echo "  url should be: https://github.com/kmatzen/lede/releases/download/v$(VERSION)/Lede-$(VERSION).dmg"
 
 # Render PanelView with curated mock data and write a PNG for the website.
 # Re-run anytime the panel design changes.

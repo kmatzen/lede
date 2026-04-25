@@ -295,8 +295,13 @@ p { margin: 0 0 14px 0; }
 /* Brand-tinted backgrounds — keyed to each provider's primary color but
    muted so the cards stay coherent with the dark theme. */
 .source-icon-google    { color: #ea4335; background: rgba(234, 67, 53, 0.12);   border: 1px solid rgba(234, 67, 53, 0.28); }
-.source-icon-microsoft { color: #0078d4; background: rgba(0, 120, 212, 0.14);   border: 1px solid rgba(0, 120, 212, 0.30); }
-.source-icon-slack     { color: #ecb22e; background: rgba(236, 178, 46, 0.14);  border: 1px solid rgba(236, 178, 46, 0.30); }
+/* Outlook ships its own multi-color SVG via <img>; neutral container. */
+.source-icon-microsoft { background: rgba(255, 255, 255, 0.06);                  border: 1px solid rgba(255, 255, 255, 0.18); }
+.source-icon-microsoft img { display: block; }
+/* Slack ships a 4-color SVG; the icon paints itself. We give it a neutral
+   container instead of a single-tinted backdrop. */
+.source-icon-slack     { background: rgba(255, 255, 255, 0.06);                  border: 1px solid rgba(255, 255, 255, 0.18); }
+.source-icon-slack svg { width: 22px; height: 22px; }
 .source-icon-github    { color: #f5f5f7; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.18); }
 .source-name { font-weight: 600; font-size: 0.95rem; }
 .source-detail { color: var(--text-muted); font-size: 0.85rem; line-height: 1.45; }
@@ -325,8 +330,9 @@ p { margin: 0 0 14px 0; }
     gap: 20px;
     flex-wrap: wrap;
 }
-.footer-brand { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.9rem; }
+.footer-brand { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.9rem; flex-wrap: wrap; }
 .footer-brand img { border-radius: 6px; }
+.footer-copyright { color: var(--text-dim); }
 .footer-nav { display: flex; gap: 18px; }
 .footer-nav a { color: var(--text-muted); font-size: 0.88rem; }
 
