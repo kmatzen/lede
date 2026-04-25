@@ -8,6 +8,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var settingsWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Crash + Keychain migration before anything else creates state.
+        CrashHandler.install()
+        KeychainMigration.runIfNeeded()
+
         let storage = Storage.shared
         engine = CoreEngine(storage: storage)
         menuBar = MenuBarController(engine: engine, onOpenSettings: { [weak self] in
@@ -15,10 +19,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         })
         installEditMenu()
 
+        // First-run: if nothing is configured yet, surface Settings so the
+        // user isn't staring at an empty bell wondering what to do.
+        if !engine.hasClaudeCreds() || !engine.hasAnySource() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                self?.openSettings()
+            }
+        }
+
         // Kick off an initial refresh if credentials exist + start the
         // 5-minute background refresh so the bell stays current.
         Task { await engine.refreshIfConfigured() }
         engine.startBackgroundRefresh()
+
+        // Initialize Sparkle (does an initial appcast check shortly after
+        // launch unless this is a Mac App Store build).
+        _ = UpdateController.shared
     }
 
     /// An `.accessory` app has no main menu by default, which means the standard

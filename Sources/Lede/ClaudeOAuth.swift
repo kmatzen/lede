@@ -4,22 +4,23 @@ import AppKit
 
 /// OAuth flow for signing in with a Claude Pro/Max subscription.
 ///
-/// Parameters match the "automatic" branch of Claude Code 2.1.119's own URL
-/// builder: loopback redirect, all 6 subscription scopes. URLs and the
-/// client identifier are ROT13'd at the source level (see Obf.r) so they
-/// don't appear as searchable strings in the compiled binary.
+/// Parameters match the "automatic" branch of Claude Code 2.1.119's own `fS_`
+/// URL builder (`isManual = false`): loopback redirect, all 6 subscription
+/// scopes. The registered client (9d1c250a-…) accepts both loopback
+/// `http://localhost:<port>/callback` and the hosted paste-code callback —
+/// we use loopback so the app catches the redirect automatically, no copy-paste.
 enum ClaudeOAuth {
-    static let clientID = Obf.r("9q1p250n-r61o-44q9-88rq-5944q1962s5r")
-    static let authorizeURL = URL(string: Obf.r("uggcf://pynhqr.pbz/pnv/bnhgu/nhgubevmr"))!
-    static let tokenURL = URL(string: Obf.r("uggcf://cyngsbez.pynhqr.pbz/i1/bnhgu/gbxra"))!
+    static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    static let authorizeURL = URL(string: "https://claude.com/cai/oauth/authorize")!
+    static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
 
     static let scopes = [
-        Obf.r("bet:perngr_ncv_xrl"),
-        Obf.r("hfre:cebsvyr"),
-        Obf.r("hfre:vasrerapr"),
-        Obf.r("hfre:frffvbaf:pynhqr_pbqr"),
-        Obf.r("hfre:zpc_freiref"),
-        Obf.r("hfre:svyr_hcybnq"),
+        "org:create_api_key",
+        "user:profile",
+        "user:inference",
+        "user:sessions:claude_code",
+        "user:mcp_servers",
+        "user:file_upload",
     ].joined(separator: " ")
 
     struct Tokens: Codable {

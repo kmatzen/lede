@@ -121,6 +121,29 @@ private struct SourcesPane: View {
     }
 }
 
+/// One-line health summary for a connected source. Shown below the
+/// "Connected" badge so the user can tell at a glance whether the latest
+/// fetch succeeded and how many items came back.
+struct SourceHealthLine: View {
+    let state: SourceState?
+
+    var body: some View {
+        if let s = state {
+            HStack(spacing: 4) {
+                if let err = s.lastError {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text(err).lineLimit(1).truncationMode(.middle)
+                } else if let when = s.lastFetchedAt {
+                    Image(systemName: "clock").foregroundStyle(.tertiary)
+                    Text("Last fetch \(when, style: .relative) ago · \(s.lastItemCount) item\(s.lastItemCount == 1 ? "" : "s")")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .font(.caption2)
+        }
+    }
+}
+
 // MARK: GitHub pane
 
 private struct GitHubPane: View {
@@ -145,6 +168,7 @@ private struct GitHubPane: View {
                         connected = false
                     }
                 }
+                SourceHealthLine(state: engine.sourceStates[.github])
             } else {
                 Text("Connect via OAuth — a code appears below; click to open GitHub with it pre-filled.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -229,6 +253,8 @@ private struct GmailPane: View {
                         connected = false
                     }
                 }
+                SourceHealthLine(state: engine.sourceStates[.gmail])
+                SourceHealthLine(state: engine.sourceStates[.calendar])
             } else {
                 Text("Reads Gmail headers + snippets (never bodies) and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -288,6 +314,7 @@ private struct SlackPane: View {
                         connected = false
                     }
                 }
+                SourceHealthLine(state: engine.sourceStates[.slack])
             } else {
                 Text("Create a Slack app at api.slack.com/apps — pick 'From a manifest' and paste Resources/slack-app-manifest.yml from the repo. Install to your workspace, then paste Client ID + Secret below.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -351,6 +378,8 @@ private struct OutlookPane: View {
                         connected = false
                     }
                 }
+                SourceHealthLine(state: engine.sourceStates[.outlook])
+                SourceHealthLine(state: engine.sourceStates[.calendar])
             } else {
                 Text("Reads Outlook unread mail and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -409,6 +438,16 @@ private struct AboutPane: View {
                     launchAtLogin = LaunchAtLogin.isEnabled
                 }
 
+            Text("Anthropic usage this month")
+                .font(.headline).padding(.top, 8)
+            VStack(alignment: .leading, spacing: 4) {
+                let u = engine.usage
+                Text("Input: \(formatTokens(u.inputTokens))   Output: \(formatTokens(u.outputTokens))")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Cache reads: \(formatTokens(u.cacheReads))   Cache writes: \(formatTokens(u.cacheWrites))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Text("Token efficiency")
                 .font(.headline).padding(.top, 8)
             VStack(alignment: .leading, spacing: 4) {
@@ -460,4 +499,15 @@ private func section<Content: View>(_ title: String, @ViewBuilder content: () ->
         Text(title).font(.headline)
         content()
     }
+}
+
+/// "1.2M" / "456K" / "789" — compact token counts for the About usage line.
+private func formatTokens(_ n: Int) -> String {
+    if n >= 1_000_000 {
+        return String(format: "%.1fM", Double(n) / 1_000_000)
+    }
+    if n >= 1_000 {
+        return String(format: "%.0fK", Double(n) / 1_000)
+    }
+    return "\(n)"
 }

@@ -21,10 +21,19 @@ enum Notifier {
     /// Post banners for any items above the threshold that haven't been
     /// notified yet. Updates Storage's "notified" set so re-runs are no-ops.
     static func notifyNewItems(_ items: [Digest.Item], storage: Storage) async {
+        // Respect snooze — but still mark the items as notified so we don't
+        // dump a flood of stacked banners when the user wakes up.
+        let suppressed = Snooze.isActive
         let threshold = 9
         let already = await storage.allNotified()
         let candidates = items.filter { $0.score >= threshold && !already.contains($0.contentHash) }
         guard !candidates.isEmpty else { return }
+
+        if suppressed {
+            for item in candidates { await storage.markNotified(item.contentHash) }
+            Log.info("snoozed: marked \(candidates.count) item(s) as notified without posting")
+            return
+        }
 
         await requestAuthIfNeeded()
         let center = UNUserNotificationCenter.current()

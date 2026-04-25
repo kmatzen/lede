@@ -7,6 +7,8 @@ final class CoreEngine: ObservableObject {
     @Published var isRefreshing = false
     @Published var lastError: String?
     @Published var lastRefreshed: Date?
+    @Published var sourceStates: [Source: SourceState] = [:]
+    @Published var usage: UsageTotals = UsageTotals()
 
     private let storage: Storage
     private var minRefreshInterval: TimeInterval = 60
@@ -14,7 +16,11 @@ final class CoreEngine: ObservableObject {
 
     init(storage: Storage) {
         self.storage = storage
-        Task { self.digest = await storage.loadLastDigest() }
+        Task {
+            self.digest = await storage.loadLastDigest()
+            self.sourceStates = await storage.allSourceStates()
+            self.usage = await storage.currentUsage()
+        }
     }
 
     // MARK: Background refresh
@@ -148,9 +154,17 @@ final class CoreEngine: ObservableObject {
                 case .success(let items):
                     Log.info("\(src.rawValue): fetched \(items.count) item(s)")
                     allItems.append(contentsOf: items)
+                    let state = SourceState(lastFetchedAt: Date(), lastItemCount: items.count, lastError: nil)
+                    await storage.setSourceState(src, state: state)
+                    sourceStates[src] = state
                 case .failure(let err):
                     Log.error("\(src.rawValue): fetch failed — \(err.localizedDescription)")
                     sourceErrors.append("\(err.localizedDescription)")
+                    var state = sourceStates[src] ?? SourceState()
+                    state.lastError = err.localizedDescription
+                    state.lastFetchedAt = Date()
+                    await storage.setSourceState(src, state: state)
+                    sourceStates[src] = state
                 }
             }
         }
@@ -167,6 +181,7 @@ final class CoreEngine: ObservableObject {
             let digest = try await pipeline.run(items: allItems)
             self.digest = digest
             self.lastRefreshed = Date()
+            self.usage = await storage.currentUsage()
             Log.info("digest built: \(digest.items.count) item(s) visible")
             await Notifier.notifyNewItems(digest.items, storage: storage)
             if !sourceErrors.isEmpty {

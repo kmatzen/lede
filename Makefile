@@ -26,9 +26,10 @@ build:
 
 bundle: build
 	@rm -rf "$(DEBUG_APP)"
-	@mkdir -p "$(DEBUG_APP)/Contents/MacOS"
+	@mkdir -p "$(DEBUG_APP)/Contents/MacOS" "$(DEBUG_APP)/Contents/Resources"
 	@cp "$(DEBUG_EXEC)" "$(DEBUG_APP)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/Info.plist "$(DEBUG_APP)/Contents/Info.plist"
+	@cp Resources/AppIcon.icns "$(DEBUG_APP)/Contents/Resources/AppIcon.icns" 2>/dev/null || true
 
 # Local dev sign — keeps Keychain Designated Requirement stable across rebuilds
 # (so "Always Allow" sticks). Hardened Runtime is enabled here too so the
@@ -53,9 +54,10 @@ release:
 
 release-bundle: release
 	@rm -rf "$(RELEASE_APP)"
-	@mkdir -p "$(RELEASE_APP)/Contents/MacOS"
+	@mkdir -p "$(RELEASE_APP)/Contents/MacOS" "$(RELEASE_APP)/Contents/Resources"
 	@cp "$(RELEASE_EXEC)" "$(RELEASE_APP)/Contents/MacOS/$(APP_NAME)"
 	@cp Resources/Info.plist "$(RELEASE_APP)/Contents/Info.plist"
+	@cp Resources/AppIcon.icns "$(RELEASE_APP)/Contents/Resources/AppIcon.icns"
 
 release-sign: release-bundle
 	@codesign --force --deep \

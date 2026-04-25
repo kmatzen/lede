@@ -202,6 +202,7 @@ struct TriagePipeline {
             maxTokens: 200,
             temperature: 0
         )
+        await recordUsage(result.usage)
         let parsed = try parseTriageJSON(result.text)
         return ItemTriage(
             contentHash: item.contentHash,
@@ -209,6 +210,16 @@ struct TriagePipeline {
             summary: String(parsed.summary.prefix(180)),
             reason: String(parsed.reason.prefix(80)),
             createdAt: Date()
+        )
+    }
+
+    private func recordUsage(_ usage: AnthropicClient.Usage?) async {
+        guard let u = usage else { return }
+        await storage.addUsage(
+            input: u.input_tokens ?? 0,
+            output: u.output_tokens ?? 0,
+            cacheReads: u.cache_read_input_tokens ?? 0,
+            cacheWrites: u.cache_creation_input_tokens ?? 0
         )
     }
 
@@ -238,6 +249,7 @@ struct TriagePipeline {
             maxTokens: 200,
             temperature: 0.2
         )
+        await recordUsage(result.usage)
         return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -52,6 +52,26 @@ struct ItemTriage: Codable, Hashable {
     let createdAt: Date
 }
 
+/// Per-source health snapshot — surfaced in Settings so the user can see at
+/// a glance whether each connection is actually working.
+struct SourceState: Codable, Equatable {
+    var lastFetchedAt: Date?
+    var lastItemCount: Int = 0
+    var lastError: String?
+}
+
+/// Running tally of Anthropic API token usage. Cheap to maintain (we just
+/// add up Usage from each /v1/messages response) and useful for cost
+/// transparency in About.
+struct UsageTotals: Codable, Equatable {
+    var inputTokens: Int = 0
+    var outputTokens: Int = 0
+    var cacheReads: Int = 0
+    var cacheWrites: Int = 0
+    /// Calendar month boundary the totals reset on. Format "yyyy-MM".
+    var monthKey: String = ""
+}
+
 /// The final digest rendered in the panel.
 struct Digest: Codable {
     struct Item: Codable, Identifiable, Hashable {

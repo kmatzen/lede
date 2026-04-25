@@ -11,9 +11,13 @@ actor Storage {
     private let digestURL: URL
     private let dismissedURL: URL
     private let notifiedURL: URL
+    private let sourceStateURL: URL
+    private let usageURL: URL
     private var triages: [String: ItemTriage] = [:]
     private var dismissed: Set<String> = []
     private var notified: Set<String> = []
+    private var sourceStates: [Source: SourceState] = [:]
+    private var usage: UsageTotals = UsageTotals()
 
     init() throws {
         let fm = FileManager.default
@@ -25,6 +29,8 @@ actor Storage {
         self.digestURL = dir.appendingPathComponent("last_digest.json")
         self.dismissedURL = dir.appendingPathComponent("dismissed.json")
         self.notifiedURL = dir.appendingPathComponent("notified.json")
+        self.sourceStateURL = dir.appendingPathComponent("source_state.json")
+        self.usageURL = dir.appendingPathComponent("usage.json")
 
         if let data = try? Data(contentsOf: cacheURL),
            let decoded = try? JSONDecoder.iso.decode([String: ItemTriage].self, from: data) {
@@ -37,6 +43,14 @@ actor Storage {
         if let data = try? Data(contentsOf: notifiedURL),
            let decoded = try? JSONDecoder.iso.decode([String].self, from: data) {
             self.notified = Set(decoded)
+        }
+        if let data = try? Data(contentsOf: sourceStateURL),
+           let decoded = try? JSONDecoder.iso.decode([Source: SourceState].self, from: data) {
+            self.sourceStates = decoded
+        }
+        if let data = try? Data(contentsOf: usageURL),
+           let decoded = try? JSONDecoder.iso.decode(UsageTotals.self, from: data) {
+            self.usage = decoded
         }
     }
 
@@ -100,6 +114,44 @@ actor Storage {
     private func saveNotified() {
         guard let data = try? JSONEncoder.iso.encode(Array(notified)) else { return }
         try? data.write(to: notifiedURL, options: .atomic)
+    }
+
+    // MARK: - Source health
+
+    func allSourceStates() -> [Source: SourceState] { sourceStates }
+
+    func setSourceState(_ source: Source, state: SourceState) {
+        sourceStates[source] = state
+        if let data = try? JSONEncoder.iso.encode(sourceStates) {
+            try? data.write(to: sourceStateURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Usage totals
+
+    func currentUsage() -> UsageTotals { usage }
+
+    /// Add to the running total. Resets the counter when the calendar month
+    /// rolls over so users see "this month" not "since install".
+    func addUsage(input: Int, output: Int, cacheReads: Int, cacheWrites: Int) {
+        let key = monthKey()
+        if usage.monthKey != key {
+            usage = UsageTotals(monthKey: key)
+        }
+        usage.inputTokens += input
+        usage.outputTokens += output
+        usage.cacheReads += cacheReads
+        usage.cacheWrites += cacheWrites
+        if let data = try? JSONEncoder.iso.encode(usage) {
+            try? data.write(to: usageURL, options: .atomic)
+        }
+    }
+
+    private func monthKey(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: date)
     }
 
     private func save() {

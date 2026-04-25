@@ -41,6 +41,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
                 self?.onPinStateChanged()
             }
             .store(in: &cancellables)
+
+        NotificationCenter.default.publisher(for: .ledeSnoozeChanged)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateBadge(digest: self?.engine.digest)
+            }
+            .store(in: &cancellables)
     }
 
     private var cancellables = Set<AnyCancellableBox>()
@@ -55,6 +62,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     /// Count text only appears when there's something worth showing.
     private func updateBadge(digest: Digest?) {
         guard let button = statusItem.button else { return }
+        let snoozed = Snooze.isActive
         let items = digest?.items ?? []
         let criticalCount = items.filter { $0.score >= 9 }.count
         let highCount = items.filter { $0.score >= 6 }.count
@@ -63,7 +71,13 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let tint: NSColor?
         let title: String
 
-        if criticalCount > 0 {
+        if snoozed {
+            // Z-bell to indicate snooze. Stays template so it dims to gray
+            // alongside the menu bar's text color.
+            symbol = "bell.slash"
+            tint = nil
+            title = ""
+        } else if criticalCount > 0 {
             symbol = "bell.badge.fill"
             tint = .systemRed
             title = " \(criticalCount)"
@@ -200,13 +214,45 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let menu = NSMenu()
         menu.addItem(withTitle: "Refresh now", action: #selector(refreshNow), keyEquivalent: "r").target = self
         menu.addItem(.separator())
+
+        // Snooze submenu — current state on top, durations below.
+        let snoozeItem = NSMenuItem(title: snoozeMenuTitle(), action: nil, keyEquivalent: "")
+        let sub = NSMenu(title: "Snooze")
+        if Snooze.isActive {
+            sub.addItem(withTitle: "Wake up", action: #selector(snoozeWake), keyEquivalent: "").target = self
+            sub.addItem(.separator())
+        }
+        sub.addItem(withTitle: "30 minutes", action: #selector(snooze30m), keyEquivalent: "").target = self
+        sub.addItem(withTitle: "1 hour", action: #selector(snooze1h), keyEquivalent: "").target = self
+        sub.addItem(withTitle: "Until tomorrow morning", action: #selector(snoozeTomorrow), keyEquivalent: "").target = self
+        snoozeItem.submenu = sub
+        menu.addItem(snoozeItem)
+        menu.addItem(.separator())
+
         menu.addItem(withTitle: "Settings…", action: #selector(openSettingsAction), keyEquivalent: ",").target = self
+        menu.addItem(withTitle: "Check for Updates…",
+                     action: #selector(UpdateController.checkForUpdates(_:)),
+                     keyEquivalent: "").target = UpdateController.shared
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Lede", action: #selector(quit), keyEquivalent: "q").target = self
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
     }
+
+    private func snoozeMenuTitle() -> String {
+        if let until = Snooze.until {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .short
+            return "Snoozed (resumes \(formatter.localizedString(for: until, relativeTo: Date())))"
+        }
+        return "Snooze"
+    }
+
+    @objc private func snooze30m() { Snooze.snooze(for: 30 * 60) }
+    @objc private func snooze1h() { Snooze.snooze(for: 60 * 60) }
+    @objc private func snoozeTomorrow() { Snooze.snoozeUntilTomorrowMorning() }
+    @objc private func snoozeWake() { Snooze.wake() }
 
     @objc private func refreshNow() {
         Task { await engine.refresh(force: true) }

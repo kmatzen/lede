@@ -29,6 +29,15 @@ The code is ready. Here's what only you can do — split into a fast direct-dist
 - [ ] `make notarize` — Apple's notary returns in 1–5 minutes; the staple step embeds the ticket so the app launches offline.
 - [ ] Wrap the notarized `Lede.app` in a `.dmg` (e.g. with `create-dmg` from Homebrew) and upload.
 
+### Sparkle (auto-update)
+
+Sparkle is wired up but its `SUFeedURL` and `SUPublicEDKey` in `Resources/Info.plist` are placeholders. Until you fill them in, Sparkle silently no-ops.
+
+- [ ] Generate an EdDSA signing keypair: `./scripts/generate_keys` (ships with Sparkle in `~/Library/Developer/Xcode/DerivedData/.../checkouts/Sparkle/bin/`, or download from the [Sparkle releases page](https://github.com/sparkle-project/Sparkle/releases)). Keep the **private** key safe; this is what authorizes update bundles.
+- [ ] Put the **public** key into `Info.plist`'s `SUPublicEDKey`.
+- [ ] Host an `appcast.xml` somewhere (GitHub Pages works) and put its URL in `SUFeedURL`. The `generate_appcast` tool that ships with Sparkle scaffolds this from a folder of release `.dmg`s.
+- [ ] Each release: `make notarize`, sign the `.dmg` with the EdDSA private key (`sign_update lede-1.0.0.dmg path/to/private.key`), append a `<item>` to `appcast.xml`, push.
+
 ## Mac App Store path — additional 1–3 weeks
 
 If you decide to do this *as well as* direct, expect to maintain two builds.

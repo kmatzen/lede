@@ -2,7 +2,8 @@ import Foundation
 import Security
 
 enum Keychain {
-    static let service = "com.claudenotif.app"
+    static let service = "com.lede.app"
+    static let legacyService = "com.claudenotif.app"
 
     @discardableResult
     static func set(_ value: String, for key: String) -> Bool {
