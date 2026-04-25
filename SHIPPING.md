@@ -25,6 +25,12 @@ The code is ready. Here's what only you can do — split into a fast direct-dist
 
 ### Build + ship
 
+Two paths — automated (recommended) or manual.
+
+**Automated (GitHub Actions):** `.github/workflows/release.yml` runs on tag push. Push `git tag v0.1.2 && git push origin v0.1.2` and a notarized, EdDSA-signed DMG appears on a GitHub Release within ~10 minutes. One-time setup of repo secrets (see the workflow's header comment) — Apple ID, team id, app-specific password, base64'd `.p12`, Sparkle private key.
+
+**Manual fallback:**
+
 - [ ] `make release-sign` to confirm the universal binary signs cleanly with your Developer ID.
 - [ ] `make notarize` — Apple's notary returns in 1–5 minutes; the staple step embeds the ticket so the app launches offline.
 - [ ] Wrap the notarized `Lede.app` in a `.dmg` (e.g. with `create-dmg` from Homebrew) and upload.
