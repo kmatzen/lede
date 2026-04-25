@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @ObservedObject var engine: CoreEngine
@@ -31,9 +32,14 @@ private struct ClaudeAuthPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                Text("Lede uses Claude to read your messages and tell you which ones matter. Set up access here.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.bottom, 4)
+
                 if AppConfig.shared.enableSubscriptionOAuth {
-                    section("Subscription (Claude Pro/Max)") {
-                        Text("Sign in with your Claude account. A browser window will open; after you approve, the app catches the callback automatically.")
+                    section("Sign in with Claude") {
+                        Text("Use your existing Claude Pro or Max subscription — no extra cost beyond what you already pay.")
                             .font(.caption).foregroundStyle(.secondary)
 
                         if hasOAuthState {
@@ -67,28 +73,34 @@ private struct ClaudeAuthPane: View {
                     Divider()
                 }
 
-                section("API key") {
+                section(AppConfig.shared.enableSubscriptionOAuth ? "Or use an API key" : "Connect Claude") {
                     Text(AppConfig.shared.enableSubscriptionOAuth
-                         ? "If you'd rather pay per token, paste an Anthropic API key. Either method works; OAuth wins if both are set."
-                         : "Paste an Anthropic API key from console.anthropic.com. Triage costs roughly $0.01/day at typical inbox volume.")
+                         ? "Pay-as-you-go alternative. Either option works; the subscription wins if both are set."
+                         : "Paste an Anthropic API key from claude.com/settings. Lede uses it to score and summarize your messages — typically less than $1/month at normal inbox volume.")
                         .font(.caption).foregroundStyle(.secondary)
-                    SecureField("sk-ant-…", text: $apiKey)
+                    SecureField("Paste your API key here", text: $apiKey)
                         .textFieldStyle(.roundedBorder)
                     HStack {
-                        Button("Save & validate") { Task { await saveAndValidate() } }
-                            .disabled(busy)
+                        Button("Save") { Task { await saveAndValidate() } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(busy || apiKey.isEmpty)
                         if busy { ProgressView().controlSize(.small) }
-                        Button("Clear") {
-                            apiKey = ""
-                            Keychain.delete(Keychain.Key.anthropicAPIKey)
-                            apiKeyStatus = ""
+                        Spacer()
+                        if !apiKey.isEmpty {
+                            Button("Remove") {
+                                apiKey = ""
+                                Keychain.delete(Keychain.Key.anthropicAPIKey)
+                                apiKeyStatus = ""
+                            }
                         }
                     }
                     if !apiKeyStatus.isEmpty {
-                        Text(apiKeyStatus)
-                            .font(.caption)
-                            .foregroundStyle(apiKeyOK ? .green : .orange)
-                            .fixedSize(horizontal: false, vertical: true)
+                        HStack(spacing: 4) {
+                            Image(systemName: apiKeyOK ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                            Text(apiKeyStatus).fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(apiKeyOK ? .green : .orange)
                     }
                 }
             }
@@ -131,10 +143,10 @@ private struct ClaudeAuthPane: View {
             )
             Keychain.set(trimmed, for: Keychain.Key.anthropicAPIKey)
             apiKeyOK = true
-            apiKeyStatus = "Validated and saved."
+            apiKeyStatus = "Working — saved."
         } catch {
             apiKeyOK = false
-            apiKeyStatus = error.localizedDescription
+            apiKeyStatus = "Couldn't connect to Claude with that key. Double-check it and try again."
         }
     }
 }
@@ -146,6 +158,8 @@ private struct SourcesPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                Text("Connect any combination — Lede only watches what you give it access to.")
+                    .font(.callout).foregroundStyle(.secondary)
                 GitHubPane(engine: engine)
                 Divider()
                 GmailPane(engine: engine)
@@ -170,7 +184,7 @@ struct SourcePauseToggle: View {
     }
 
     var body: some View {
-        Toggle("Include in refreshes", isOn: $enabled)
+        Toggle("Watch this source", isOn: $enabled)
             .toggleStyle(.checkbox)
             .font(.caption)
             .onChange(of: enabled) { _, newValue in
@@ -230,10 +244,10 @@ private struct GitHubPane: View {
                 SourceHealthLine(state: engine.sourceStates[.github])
                 SourcePauseToggle(source: .github)
             } else {
-                Text("Connect via OAuth — a code appears below; click to open GitHub with it pre-filled.")
+                Text("See your GitHub notifications (PR reviews, mentions, assigned issues) ranked by what needs your attention first.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Connect with GitHub") { task = Task { await connectDevice() } }
+                    Button("Connect GitHub") { task = Task { await connectDevice() } }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
                     if busy {
@@ -242,26 +256,33 @@ private struct GitHubPane: View {
                     }
                 }
                 if !userCode.isEmpty {
-                    HStack {
-                        Text("Code:")
-                        Text(userCode).font(.system(.body, design: .monospaced, weight: .bold))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("GitHub opened in your browser. Enter this code there to approve:")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text(userCode)
+                            .font(.system(.title3, design: .monospaced, weight: .bold))
                             .textSelection(.enabled)
-                        Text("— waiting for approval…").font(.caption).foregroundStyle(.secondary)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .padding(.top, 4)
+                }
+                DisclosureGroup("Use a personal access token instead") {
+                    Text("If you'd rather not approve a sign-in, you can paste a GitHub personal access token with the `notifications` scope.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    SecureField("ghp_… or github_pat_…", text: $pat)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save token") {
+                        if pat.isEmpty {
+                            Keychain.delete(Keychain.Key.githubPAT)
+                        } else {
+                            Keychain.set(pat, for: Keychain.Key.githubPAT)
+                            connected = true
+                        }
                     }
                 }
-                Divider().padding(.vertical, 4)
-                Text("Or paste a PAT with `notifications` scope:")
-                    .font(.caption).foregroundStyle(.secondary)
-                SecureField("ghp_… or github_pat_…", text: $pat)
-                    .textFieldStyle(.roundedBorder)
-                Button("Save PAT") {
-                    if pat.isEmpty {
-                        Keychain.delete(Keychain.Key.githubPAT)
-                    } else {
-                        Keychain.set(pat, for: Keychain.Key.githubPAT)
-                        connected = true
-                    }
-                }
+                .font(.caption)
+                .padding(.top, 4)
             }
             if !status.isEmpty {
                 Text(status).font(.caption).foregroundStyle(.orange)
@@ -322,7 +343,7 @@ private struct GmailPane: View {
                 SourcePauseToggle(source: .gmail)
                 SourcePauseToggle(source: .calendar)
             } else {
-                Text("Reads Gmail headers + snippets (never bodies) and upcoming calendar events.")
+                Text("See important Gmail messages (sender, subject, preview — never the full body) and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Connect Google") { task = Task { await connect() } }
@@ -384,8 +405,33 @@ private struct SlackPane: View {
                 SourceHealthLine(state: engine.sourceStates[.slack])
                 SourcePauseToggle(source: .slack)
             } else {
-                Text("Create a Slack app at api.slack.com/apps — pick 'From a manifest' and paste Resources/slack-app-manifest.yml from the repo. Install to your workspace, then paste Client ID + Secret below.")
+                Text("See unread channel messages, DMs, and mentions across your workspace, ranked by what's worth your attention.")
                     .font(.caption).foregroundStyle(.secondary)
+                Text("Slack doesn't allow generic third-party reading apps, so this needs a one-time setup in Slack itself. Lede provides the configuration; you copy and paste it.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                DisclosureGroup("Setup steps (one time, ~3 minutes)") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("1. Go to api.slack.com/apps, click **Create New App**, choose **From a manifest**, pick your workspace.")
+                        HStack {
+                            Text("2. Paste this app configuration:")
+                            Spacer()
+                            Button("Copy manifest") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(slackManifestYAML, forType: .string)
+                            }
+                            .controlSize(.small)
+                        }
+                        Text("3. Click Create, then on the next page click **Install to Workspace** and approve.")
+                        Text("4. On that app's settings page, find **Client ID** and **Client Secret** under **Basic Information** and paste them below.")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+
                 TextField("Client ID", text: $clientID)
                     .textFieldStyle(.roundedBorder)
                 SecureField("Client Secret", text: $clientSecret)
@@ -454,7 +500,7 @@ private struct OutlookPane: View {
                 SourceHealthLine(state: engine.sourceStates[.calendar])
                 SourcePauseToggle(source: .outlook)
             } else {
-                Text("Reads Outlook unread mail and upcoming calendar events.")
+                Text("See unread Outlook messages and upcoming calendar events. Lede only reads — never sends or modifies.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button("Connect Microsoft") { task = Task { await connect() } }
@@ -502,103 +548,123 @@ private struct AboutPane: View {
     @AppStorage("lede.quietEndHour") private var quietEnd: Int = 7
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Lede 0.1").font(.title2).bold()
-            Text("A pinned menu-bar digest that surfaces the most important items from your inboxes.")
-                .foregroundStyle(.secondary)
-
-            Toggle("Launch at login", isOn: $launchAtLogin)
-                .padding(.top, 6)
-                .onChange(of: launchAtLogin) { _, newValue in
-                    LaunchAtLogin.setEnabled(newValue)
-                    // Reflect what actually took (in case register failed).
-                    launchAtLogin = LaunchAtLogin.isEnabled
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Lede 0.1").font(.title2).bold()
+                    Text("Watch your inboxes, surface what matters.")
+                        .foregroundStyle(.secondary)
                 }
 
-            HStack {
-                Text("Refresh every")
-                Picker("", selection: $refreshSeconds) {
-                    Text("1 min").tag(60.0)
-                    Text("5 min").tag(300.0)
-                    Text("15 min").tag(900.0)
-                    Text("30 min").tag(1800.0)
-                    Text("Off").tag(0.0)
-                }.labelsHidden().frame(width: 100)
-            }
-            .onChange(of: refreshSeconds) { _, newValue in
-                if newValue > 0 {
-                    engine.startBackgroundRefresh(interval: newValue)
-                } else {
-                    engine.stopBackgroundRefresh()
-                }
-            }
+                section("Behavior") {
+                    Toggle("Open Lede when I log in", isOn: $launchAtLogin)
+                        .onChange(of: launchAtLogin) { _, newValue in
+                            LaunchAtLogin.setEnabled(newValue)
+                            launchAtLogin = LaunchAtLogin.isEnabled
+                        }
 
-            Toggle("Quiet hours (auto-snooze notifications)", isOn: $quietEnabled)
-            if quietEnabled {
-                HStack {
-                    Text("From").font(.caption)
-                    Picker("", selection: $quietStart) {
-                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
-                    }.labelsHidden().frame(width: 80)
-                    Text("until").font(.caption)
-                    Picker("", selection: $quietEnd) {
-                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
-                    }.labelsHidden().frame(width: 80)
-                }
-            }
+                    HStack {
+                        Text("Check for new messages every")
+                        Picker("", selection: $refreshSeconds) {
+                            Text("1 min").tag(60.0)
+                            Text("5 min").tag(300.0)
+                            Text("15 min").tag(900.0)
+                            Text("30 min").tag(1800.0)
+                            Text("Off").tag(0.0)
+                        }.labelsHidden().frame(width: 100)
+                    }
+                    .onChange(of: refreshSeconds) { _, newValue in
+                        if newValue > 0 {
+                            engine.startBackgroundRefresh(interval: newValue)
+                        } else {
+                            engine.stopBackgroundRefresh()
+                        }
+                    }
 
-            Text("Anthropic usage this month")
-                .font(.headline).padding(.top, 8)
-            VStack(alignment: .leading, spacing: 4) {
-                let u = engine.usage
-                Text("Input: \(formatTokens(u.inputTokens))   Output: \(formatTokens(u.outputTokens))")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("Cache reads: \(formatTokens(u.cacheReads))   Cache writes: \(formatTokens(u.cacheWrites))")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text(estimatedCost(u))
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            Text("Token efficiency")
-                .font(.headline).padding(.top, 8)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("• Content-hash cache: unchanged items cost 0 tokens").font(.caption)
-                Text("• Haiku for triage, Sonnet only for top-N synthesis").font(.caption)
-                Text("• Prompt caching on system prompts (~90% discount on re-use)").font(.caption)
-                Text("• Gmail scope `gmail.metadata` — headers + snippets only").font(.caption)
-            }.foregroundStyle(.secondary)
-
-            Text("Dismissed items").font(.headline).padding(.top, 8)
-            HStack {
-                Text("\(dismissedCount) item(s) dismissed and filtered out.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Reset dismissals") {
-                    Task {
-                        await engine.clearDismissals()
-                        await engine.refresh(force: true)
-                        dismissedCount = 0
+                    Toggle("Stay quiet during certain hours", isOn: $quietEnabled)
+                    if quietEnabled {
+                        HStack(spacing: 4) {
+                            Text("From").font(.caption).foregroundStyle(.secondary)
+                            Picker("", selection: $quietStart) {
+                                ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                            }.labelsHidden().frame(width: 80)
+                            Text("until").font(.caption).foregroundStyle(.secondary)
+                            Picker("", selection: $quietEnd) {
+                                ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                            }.labelsHidden().frame(width: 80)
+                            Spacer()
+                        }
                     }
                 }
-                .disabled(dismissedCount == 0)
-            }
 
-            Text("Debug").font(.headline).padding(.top, 8)
-            HStack {
-                Text("Pipeline writes to a log file (dedupe, fetch counts, filter decisions).")
-                    .font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Open log") {
-                    NSWorkspace.shared.open(Log.fileURL)
+                Divider()
+
+                section("Cost this month") {
+                    Text(estimatedCost(engine.usage))
+                        .font(.title3).bold()
+                    Text("Lede asks Claude to score and summarize your messages, which uses a small amount of API credit. Items you've already seen don't get re-scored.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Button("Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
+
+                Divider()
+
+                section("Dismissed items") {
+                    HStack {
+                        Text("You've dismissed \(dismissedCount) item\(dismissedCount == 1 ? "" : "s") that won't show again.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Show dismissed again") {
+                            Task {
+                                await engine.clearDismissals()
+                                await engine.refresh(force: true)
+                                dismissedCount = 0
+                            }
+                        }
+                        .disabled(dismissedCount == 0)
+                    }
                 }
+
+                Divider()
+
+                DisclosureGroup("Troubleshooting") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("If Lede isn't behaving as expected, the activity log can help you (or someone helping you) figure out why.")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Button("Open activity log") { NSWorkspace.shared.open(Log.fileURL) }
+                            Button("Show in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([Log.fileURL])
+                            }
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            usageDetailRow("Input tokens", formatTokens(engine.usage.inputTokens))
+                            usageDetailRow("Output tokens", formatTokens(engine.usage.outputTokens))
+                            usageDetailRow("Cache reads", formatTokens(engine.usage.cacheReads))
+                            usageDetailRow("Cache writes", formatTokens(engine.usage.cacheWrites))
+                        }
+                        .padding(.top, 4)
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.callout)
+
+                Spacer(minLength: 0)
             }
-            Spacer()
+            .padding(8)
         }
-        .padding(8)
         .task { dismissedCount = await engine.dismissCount() }
+    }
+
+    @ViewBuilder
+    private func usageDetailRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).monospacedDigit()
+        }
+        .font(.caption)
     }
 }
 
@@ -629,6 +695,33 @@ private func estimatedCost(_ u: UsageTotals) -> String {
     }
     return String(format: "Estimated cost: $%.2f (Haiku rates, Sonnet synthesis adds ~10%%)", dollars)
 }
+
+/// Slack app manifest — pasted by the user during setup. Embedded so we can
+/// surface it as a Copy button without depending on the repo file.
+private let slackManifestYAML = """
+display_information:
+  name: Lede
+  description: Triage Slack messages via the Lede menu-bar app.
+  background_color: "#1d2533"
+oauth_config:
+  redirect_urls:
+    - http://localhost
+  scopes:
+    user:
+      - channels:history
+      - channels:read
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - mpim:history
+      - mpim:read
+      - users:read
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
+"""
 
 /// "1.2M" / "456K" / "789" — compact token counts for the About usage line.
 private func formatTokens(_ n: Int) -> String {
