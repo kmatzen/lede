@@ -1,9 +1,10 @@
 name: Release
 
 # Cuts a notarized, EdDSA-signed Lede release whenever you push a tag like
-# `v0.1.2`. Produces a Lede-X.Y.Z.dmg attached to a GitHub Release whose body
-# contains the Sparkle appcast snippet you'll paste into docs/appcast.xml when
-# you're ready to publish the update to existing installs.
+# `v0.1.2`. Produces a Lede-X.Y.Z.dmg attached to a GitHub Release, then
+# auto-publishes the update to existing installs by appending the new
+# <item> to docs/appcast.xml on main (GitHub Pages serves it). Pushing the
+# tag is the rollout signal — push when you're ready for users to update.
 #
 # Required repo secrets (Settings → Secrets and variables → Actions):
 #
@@ -163,14 +164,82 @@ jobs:
 
             **[Lede-${{ env.VERSION }}.dmg](https://github.com/kmatzen/lede/releases/download/v${{ env.VERSION }}/Lede-${{ env.VERSION }}.dmg)** — notarized, stapled, EdDSA-signed.
 
-            ## Auto-update
-
-            To publish this build to existing installs via Sparkle, paste the
-            following inside `<channel>` in `docs/appcast.xml` and push to main:
+            Existing installs auto-update via Sparkle once `docs/appcast.xml`
+            on `main` includes this entry (committed by the next workflow step):
 
             ```xml
             ${{ steps.snippet.outputs.snippet }}
             ```
+
+      - name: Publish to appcast.xml on main
+        env:
+          ATTRS: ${{ steps.sparkle.outputs.attrs }}
+        run: |
+          set -euo pipefail
+          PUBDATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
+
+          # Switch to the tip of main, preserving untracked build artifacts.
+          # main may have moved since the tag was created; we want our edit
+          # to apply on top of whatever HEAD is now.
+          git fetch origin main
+          git checkout -B main origin/main
+
+          # Inserting via Python: the ATTRS string contains base64 with /+=
+          # characters, which is fragile under sed. Idempotent — if
+          # appcast.xml already advertises this version, the workflow
+          # replaces that <item> in place rather than duplicating it.
+          ATTRS="$ATTRS" PUBDATE="$PUBDATE" python3 <<'PYEOF'
+          import os, re
+          version = os.environ["VERSION"]
+          attrs = os.environ["ATTRS"]
+          pubdate = os.environ["PUBDATE"]
+
+          path = "docs/appcast.xml"
+          with open(path) as f:
+              content = f.read()
+
+          item = (
+              "        <item>\n"
+              f"            <title>Version {version}</title>\n"
+              f"            <pubDate>{pubdate}</pubDate>\n"
+              f"            <sparkle:version>{version}</sparkle:version>\n"
+              f"            <sparkle:shortVersionString>{version}</sparkle:shortVersionString>\n"
+              "            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>\n"
+              f'            <enclosure url="https://github.com/kmatzen/lede/releases/download/v{version}/Lede-{version}.dmg"\n'
+              '                       type="application/octet-stream"\n'
+              f"                       {attrs} />\n"
+              "        </item>\n"
+          )
+
+          # Replace existing item for this version if present (re-runs of the
+          # same tag), otherwise insert at the top of <channel>, just before
+          # </channel>.
+          existing = re.compile(
+              r"        <item>\s*\n"
+              r"            <title>Version " + re.escape(version) + r"</title>.*?</item>\n",
+              re.DOTALL,
+          )
+          if existing.search(content):
+              content = existing.sub(item, content, count=1)
+              print(f"appcast: replaced existing v{version} entry")
+          else:
+              content = content.replace("</channel>", item + "    </channel>", 1)
+              print(f"appcast: inserted v{version}")
+
+          with open(path, "w") as f:
+              f.write(content)
+          PYEOF
+
+          if git diff --quiet docs/appcast.xml; then
+              echo "appcast.xml unchanged — nothing to publish"
+              exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/appcast.xml
+          git commit -m "Appcast: publish v$VERSION [skip ci]"
+          git push origin main
 
       - name: Clean up keychain
         if: always()
