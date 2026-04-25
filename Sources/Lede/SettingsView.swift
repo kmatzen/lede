@@ -131,7 +131,6 @@ private struct ClaudeAuthPane: View {
             apiKeyStatus = "Empty key — nothing to save."
             return
         }
-        // Round-trip a 1-token call to surface 401/403 immediately.
         let client = AnthropicClient(auth: .apiKey(trimmed))
         do {
             _ = try await client.complete(
@@ -155,25 +154,27 @@ private struct ClaudeAuthPane: View {
 
 private struct SourcesPane: View {
     @ObservedObject var engine: CoreEngine
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Connect any combination — Lede only watches what you give it access to.")
+                Text("Connect any combination — Lede only watches what you give it access to. You can add more than one account per provider.")
                     .font(.callout).foregroundStyle(.secondary)
-                GitHubPane(engine: engine)
+                GitHubAccountsPane(engine: engine)
                 Divider()
-                GmailPane(engine: engine)
+                GoogleAccountsPane(engine: engine)
                 Divider()
-                SlackPane(engine: engine)
+                SlackAccountsPane(engine: engine)
                 Divider()
-                OutlookPane(engine: engine)
+                MicrosoftAccountsPane(engine: engine)
             }.padding(8)
         }
     }
 }
 
-/// Toggle gating whether a configured source actually contributes to refreshes.
-/// Useful for "I'm in a meeting, stop showing me Slack" without nuking the OAuth token.
+/// Per-source enable/disable toggle. Applies across every account that
+/// produces items of this source — useful for "I'm in a meeting, stop showing
+/// me Slack" without nuking any OAuth tokens.
 struct SourcePauseToggle: View {
     let source: Source
     @State private var enabled: Bool
@@ -184,7 +185,7 @@ struct SourcePauseToggle: View {
     }
 
     var body: some View {
-        Toggle("Watch this source", isOn: $enabled)
+        Toggle("Watch \(source.displayName)", isOn: $enabled)
             .toggleStyle(.checkbox)
             .font(.caption)
             .onChange(of: enabled) { _, newValue in
@@ -193,97 +194,127 @@ struct SourcePauseToggle: View {
     }
 }
 
-/// One-line health summary for a connected source. Shown below the
-/// "Connected" badge so the user can tell at a glance whether the latest
-/// fetch succeeded and how many items came back.
-struct SourceHealthLine: View {
-    let state: SourceState?
+/// One row representing a single connected account: label + per-source health
+/// + Disconnect button. Shared by every provider pane.
+private struct AccountRow: View {
+    @ObservedObject var engine: CoreEngine
+    let account: Account
+    @State private var disconnecting = false
 
     var body: some View {
-        if let s = state {
-            HStack(spacing: 4) {
-                if let err = s.lastError {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(err).lineLimit(1).truncationMode(.middle)
-                } else if let when = s.lastFetchedAt {
-                    Image(systemName: "clock").foregroundStyle(.tertiary)
-                    Text("Last fetch \(when, style: .relative) ago · \(s.lastItemCount) item\(s.lastItemCount == 1 ? "" : "s")")
-                        .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Image(systemName: "person.crop.circle.fill").foregroundStyle(.secondary)
+                Text(account.label).fontWeight(.medium)
+                Spacer()
+                if disconnecting {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button("Disconnect") {
+                        disconnecting = true
+                        Task {
+                            await engine.disconnectAccount(account)
+                            disconnecting = false
+                        }
+                    }
+                    .controlSize(.small)
                 }
             }
-            .font(.caption2)
+            ForEach(account.provider.sources, id: \.rawValue) { source in
+                let key = Storage.stateKey(account: account, source: source)
+                if let state = engine.sourceStates[key] {
+                    SourceHealthLine(label: source.displayName, state: state)
+                }
+            }
         }
+        .padding(.vertical, 4)
     }
 }
 
-// MARK: GitHub pane
+/// One-line health summary for a connected (account, source). Shows when the
+/// last fetch happened and how many items came back, or any error.
+struct SourceHealthLine: View {
+    let label: String
+    let state: SourceState
 
-private struct GitHubPane: View {
-    let engine: CoreEngine
-    @State private var pat: String = Keychain.get(Keychain.Key.githubPAT) ?? ""
+    var body: some View {
+        HStack(spacing: 4) {
+            if let err = state.lastError {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                Text("\(label): \(err)").lineLimit(1).truncationMode(.middle)
+            } else if let when = state.lastFetchedAt {
+                Image(systemName: "clock").foregroundStyle(.tertiary)
+                Text("\(label) — \(when, style: .relative) ago · \(state.lastItemCount) item\(state.lastItemCount == 1 ? "" : "s")")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption2)
+    }
+}
+
+// MARK: - GitHub
+
+private struct GitHubAccountsPane: View {
+    @ObservedObject var engine: CoreEngine
+    @State private var pat: String = ""
     @State private var busy = false
     @State private var status = ""
     @State private var userCode = ""
-    @State private var connected = Keychain.get(Keychain.Key.githubAccess) != nil
-        || Keychain.get(Keychain.Key.githubPAT) != nil
     @State private var task: Task<Void, Never>? = nil
+
+    private var connectedAccounts: [Account] {
+        engine.accounts.filter { $0.provider == .github }
+    }
 
     var body: some View {
         section("GitHub") {
-            if connected {
-                HStack {
-                    Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
-                    Spacer()
-                    Button("Disconnect") {
-                        GitHubOAuth.signOut()
-                        Keychain.delete(Keychain.Key.githubPAT)
-                        connected = false
-                        Task { await engine.clearSourceState(.github) }
-                    }
-                }
-                SourceHealthLine(state: engine.sourceStates[.github])
-                SourcePauseToggle(source: .github)
-            } else {
+            if connectedAccounts.isEmpty {
                 Text("See your GitHub notifications (PR reviews, mentions, assigned issues) ranked by what needs your attention first.")
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Connect GitHub") { task = Task { await connectDevice() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(busy)
-                    if busy {
-                        ProgressView().controlSize(.small)
-                        Button("Cancel") { task?.cancel() }
-                    }
+            } else {
+                ForEach(connectedAccounts) { account in
+                    AccountRow(engine: engine, account: account)
                 }
-                if !userCode.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("GitHub opened in your browser. Enter this code there to approve:")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text(userCode)
-                            .font(.system(.title3, design: .monospaced, weight: .bold))
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-                    }
-                    .padding(.top, 4)
+                SourcePauseToggle(source: .github)
+            }
+
+            HStack {
+                Button(connectedAccounts.isEmpty ? "Connect GitHub" : "Add another GitHub account") {
+                    task = Task { await connectDevice() }
                 }
-                DisclosureGroup("Use a personal access token instead") {
-                    Text("If you'd rather not approve a sign-in, you can paste a GitHub personal access token with the `notifications` scope.")
-                        .font(.caption2).foregroundStyle(.secondary)
-                    SecureField("ghp_… or github_pat_…", text: $pat)
-                        .textFieldStyle(.roundedBorder)
-                    Button("Save token") {
-                        if pat.isEmpty {
-                            Keychain.delete(Keychain.Key.githubPAT)
-                        } else {
-                            Keychain.set(pat, for: Keychain.Key.githubPAT)
-                            connected = true
-                        }
-                    }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+                if busy {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { task?.cancel() }
                 }
-                .font(.caption)
+            }
+            if !userCode.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("GitHub opened in your browser. Enter this code there to approve:")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(userCode)
+                        .font(.system(.title3, design: .monospaced, weight: .bold))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
                 .padding(.top, 4)
             }
+            DisclosureGroup("Use a personal access token instead") {
+                Text("If you'd rather not approve a sign-in, paste a GitHub personal access token with the `notifications` scope. Lede will detect which account it belongs to.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                SecureField("ghp_… or github_pat_…", text: $pat)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Save token") { Task { await savePAT() } }
+                        .disabled(pat.isEmpty || busy)
+                    if busy { ProgressView().controlSize(.small) }
+                }
+            }
+            .font(.caption)
+            .padding(.top, 4)
+
             if !status.isEmpty {
                 Text(status).font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -300,9 +331,13 @@ private struct GitHubPane: View {
             userCode = code.user_code
             GitHubOAuth.openVerificationPage(code)
             let token = try await GitHubOAuth.pollForToken(deviceCode: code)
-            GitHubOAuth.persist(token)
+            let identity = try await GitHubOAuth.identity(token: token)
+            GitHubOAuth.persistOAuth(token: token, accountID: identity.id)
+            await Storage.shared.upsertAccount(Account(
+                provider: .github, id: identity.id, label: identity.label, connectedAt: Date()
+            ))
+            await engine.reloadAccounts()
             userCode = ""
-            connected = true
             Task { await engine.refresh(force: true) }
         } catch is CancellationError {
             status = "Cancelled."
@@ -312,47 +347,62 @@ private struct GitHubPane: View {
             userCode = ""
         }
     }
+
+    private func savePAT() async {
+        busy = true
+        status = ""
+        defer { busy = false }
+        let token = pat.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return }
+        do {
+            let identity = try await GitHubOAuth.identity(token: token)
+            GitHubOAuth.persistPAT(token: token, accountID: identity.id)
+            await Storage.shared.upsertAccount(Account(
+                provider: .github, id: identity.id, label: identity.label, connectedAt: Date()
+            ))
+            await engine.reloadAccounts()
+            pat = ""
+            Task { await engine.refresh(force: true) }
+        } catch {
+            status = "Couldn't validate token: \(error.localizedDescription)"
+        }
+    }
 }
 
-// MARK: Gmail pane
+// MARK: - Google
 
-private struct GmailPane: View {
-    let engine: CoreEngine
+private struct GoogleAccountsPane: View {
+    @ObservedObject var engine: CoreEngine
     @State private var busy = false
     @State private var status = ""
-    @State private var connected = Keychain.get(Keychain.Key.gmailRefresh) != nil
     @State private var task: Task<Void, Never>? = nil
+
+    private var connectedAccounts: [Account] {
+        engine.accounts.filter { $0.provider == .google }
+    }
 
     var body: some View {
         section("Google (Gmail + Calendar)") {
-            if connected {
-                HStack {
-                    Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
-                    Spacer()
-                    Button("Disconnect") {
-                        GoogleOAuth.signOut()
-                        connected = false
-                        Task {
-                            await engine.clearSourceState(.gmail)
-                            await engine.clearSourceState(.calendar)
-                        }
-                    }
-                }
-                SourceHealthLine(state: engine.sourceStates[.gmail])
-                SourceHealthLine(state: engine.sourceStates[.calendar])
-                SourcePauseToggle(source: .gmail)
-                SourcePauseToggle(source: .calendar)
-            } else {
+            if connectedAccounts.isEmpty {
                 Text("See important Gmail messages (sender, subject, preview — never the full body) and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Connect Google") { task = Task { await connect() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(busy)
-                    if busy {
-                        ProgressView().controlSize(.small)
-                        Button("Cancel") { task?.cancel() }
-                    }
+            } else {
+                ForEach(connectedAccounts) { account in
+                    AccountRow(engine: engine, account: account)
+                }
+                SourcePauseToggle(source: .gmail)
+                SourcePauseToggle(source: .calendar)
+            }
+
+            HStack {
+                Button(connectedAccounts.isEmpty ? "Connect Google" : "Add another Google account") {
+                    task = Task { await connect() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+                if busy {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { task?.cancel() }
                 }
             }
             if !status.isEmpty {
@@ -368,8 +418,12 @@ private struct GmailPane: View {
         defer { busy = false }
         do {
             let tokens = try await GoogleOAuth.connect()
-            GoogleOAuth.persist(tokens)
-            connected = true
+            let identity = try await GoogleOAuth.identity(accessToken: tokens.access_token)
+            GoogleOAuth.persist(tokens, accountID: identity.id)
+            await Storage.shared.upsertAccount(Account(
+                provider: .google, id: identity.id, label: identity.label, connectedAt: Date()
+            ))
+            await engine.reloadAccounts()
             Task { await engine.refresh(force: true) }
         } catch is CancellationError {
             status = "Cancelled."
@@ -379,73 +433,74 @@ private struct GmailPane: View {
     }
 }
 
-// MARK: Slack pane
+// MARK: - Slack
 
-private struct SlackPane: View {
-    let engine: CoreEngine
-    @State private var clientID: String = Keychain.get(Keychain.Key.slackClientID) ?? ""
-    @State private var clientSecret: String = Keychain.get(Keychain.Key.slackClientSecret) ?? ""
+private struct SlackAccountsPane: View {
+    @ObservedObject var engine: CoreEngine
+    @State private var clientID: String = ""
+    @State private var clientSecret: String = ""
     @State private var busy = false
     @State private var status = ""
-    @State private var connected = Keychain.get(Keychain.Key.slackAccess) != nil
+    @State private var showingAddSheet = false
     @State private var task: Task<Void, Never>? = nil
+
+    private var connectedAccounts: [Account] {
+        engine.accounts.filter { $0.provider == .slack }
+    }
 
     var body: some View {
         section("Slack") {
-            if connected {
-                HStack {
-                    Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
-                    Spacer()
-                    Button("Disconnect") {
-                        SlackOAuth.signOut()
-                        connected = false
-                        Task { await engine.clearSourceState(.slack) }
-                    }
-                }
-                SourceHealthLine(state: engine.sourceStates[.slack])
-                SourcePauseToggle(source: .slack)
-            } else {
+            if connectedAccounts.isEmpty {
                 Text("See unread channel messages, DMs, and mentions across your workspace, ranked by what's worth your attention.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("Slack doesn't allow generic third-party reading apps, so this needs a one-time setup in Slack itself. Lede provides the configuration; you copy and paste it.")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(connectedAccounts) { account in
+                    AccountRow(engine: engine, account: account)
+                }
+                SourcePauseToggle(source: .slack)
+            }
 
-                DisclosureGroup("Setup steps (one time, ~3 minutes)") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("1. Go to api.slack.com/apps, click **Create New App**, choose **From a manifest**, pick your workspace.")
-                        HStack {
-                            Text("2. Paste this app configuration:")
-                            Spacer()
-                            Button("Copy manifest") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(slackManifestYAML, forType: .string)
-                            }
-                            .controlSize(.small)
+            Text("Slack doesn't allow generic third-party reading apps, so each workspace needs a one-time setup in Slack itself. Lede provides the configuration; you copy and paste it.")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup("Setup steps (one time per workspace, ~3 min)") {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("1. Go to api.slack.com/apps, click **Create New App**, choose **From a manifest**, pick the workspace.")
+                    HStack {
+                        Text("2. Paste this app configuration:")
+                        Spacer()
+                        Button("Copy manifest") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(slackManifestYAML, forType: .string)
                         }
-                        Text("3. Click Create, then on the next page click **Install to Workspace** and approve.")
-                        Text("4. On that app's settings page, find **Client ID** and **Client Secret** under **Basic Information** and paste them below.")
+                        .controlSize(.small)
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+                    Text("3. Click Create, then on the next page click **Install to Workspace** and approve.")
+                    Text("4. On that app's settings page, find **Client ID** and **Client Secret** under **Basic Information** and paste them below.")
                 }
                 .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+            }
+            .font(.caption)
 
-                TextField("Client ID", text: $clientID)
-                    .textFieldStyle(.roundedBorder)
-                SecureField("Client Secret", text: $clientSecret)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Button("Connect Slack") { task = Task { await connect() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(clientID.isEmpty || clientSecret.isEmpty || busy)
-                    if busy {
-                        ProgressView().controlSize(.small)
-                        Button("Cancel") { task?.cancel() }
-                    }
+            TextField("Client ID", text: $clientID)
+                .textFieldStyle(.roundedBorder)
+            SecureField("Client Secret", text: $clientSecret)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Button(connectedAccounts.isEmpty ? "Connect Slack" : "Add Slack workspace") {
+                    task = Task { await connect() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(clientID.isEmpty || clientSecret.isEmpty || busy)
+                if busy {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { task?.cancel() }
                 }
             }
+
             if !status.isEmpty {
                 Text(status).font(.caption).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -454,15 +509,18 @@ private struct SlackPane: View {
     }
 
     private func connect() async {
-        Keychain.set(clientID, for: Keychain.Key.slackClientID)
-        Keychain.set(clientSecret, for: Keychain.Key.slackClientSecret)
         busy = true
         status = ""
         defer { busy = false }
         do {
-            let creds = try await SlackOAuth.connect(clientID: clientID, clientSecret: clientSecret)
-            SlackOAuth.persist(creds)
-            connected = true
+            let result = try await SlackOAuth.connect(clientID: clientID, clientSecret: clientSecret)
+            SlackOAuth.persist(result, clientID: clientID, clientSecret: clientSecret)
+            await Storage.shared.upsertAccount(Account(
+                provider: .slack, id: result.teamID, label: result.teamName, connectedAt: Date()
+            ))
+            await engine.reloadAccounts()
+            clientID = ""
+            clientSecret = ""
             Task { await engine.refresh(force: true) }
         } catch is CancellationError {
             status = "Cancelled."
@@ -472,44 +530,40 @@ private struct SlackPane: View {
     }
 }
 
-// MARK: Outlook pane
+// MARK: - Microsoft
 
-private struct OutlookPane: View {
-    let engine: CoreEngine
+private struct MicrosoftAccountsPane: View {
+    @ObservedObject var engine: CoreEngine
     @State private var busy = false
     @State private var status = ""
-    @State private var connected = Keychain.get(Keychain.Key.outlookRefresh) != nil
     @State private var task: Task<Void, Never>? = nil
+
+    private var connectedAccounts: [Account] {
+        engine.accounts.filter { $0.provider == .microsoft }
+    }
 
     var body: some View {
         section("Microsoft (Outlook + Calendar)") {
-            if connected {
-                HStack {
-                    Label("Connected", systemImage: "checkmark.seal.fill").foregroundStyle(.green)
-                    Spacer()
-                    Button("Disconnect") {
-                        MicrosoftOAuth.signOut()
-                        connected = false
-                        Task {
-                            await engine.clearSourceState(.outlook)
-                            await engine.clearSourceState(.calendar)
-                        }
-                    }
-                }
-                SourceHealthLine(state: engine.sourceStates[.outlook])
-                SourceHealthLine(state: engine.sourceStates[.calendar])
-                SourcePauseToggle(source: .outlook)
-            } else {
+            if connectedAccounts.isEmpty {
                 Text("See unread Outlook messages and upcoming calendar events. Lede only reads — never sends or modifies.")
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button("Connect Microsoft") { task = Task { await connect() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(busy)
-                    if busy {
-                        ProgressView().controlSize(.small)
-                        Button("Cancel") { task?.cancel() }
-                    }
+            } else {
+                ForEach(connectedAccounts) { account in
+                    AccountRow(engine: engine, account: account)
+                }
+                SourcePauseToggle(source: .outlook)
+                SourcePauseToggle(source: .calendar)
+            }
+
+            HStack {
+                Button(connectedAccounts.isEmpty ? "Connect Microsoft" : "Add another Microsoft account") {
+                    task = Task { await connect() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+                if busy {
+                    ProgressView().controlSize(.small)
+                    Button("Cancel") { task?.cancel() }
                 }
             }
             if !status.isEmpty {
@@ -525,8 +579,12 @@ private struct OutlookPane: View {
         defer { busy = false }
         do {
             let tokens = try await MicrosoftOAuth.connect()
-            MicrosoftOAuth.persist(tokens)
-            connected = true
+            let identity = try await MicrosoftOAuth.identity(accessToken: tokens.access_token)
+            MicrosoftOAuth.persist(tokens, accountID: identity.id)
+            await Storage.shared.upsertAccount(Account(
+                provider: .microsoft, id: identity.id, label: identity.label, connectedAt: Date()
+            ))
+            await engine.reloadAccounts()
             Task { await engine.refresh(force: true) }
         } catch is CancellationError {
             status = "Cancelled."
@@ -713,7 +771,6 @@ private func estimatedCost(_ u: UsageTotals) -> String {
     for (model, usage) in u.byModel {
         dollars += ratesFor(model: model).cost(usage)
     }
-    // Account for legacy flat counters (data from before per-model tracking).
     let legacy = ModelUsage(
         inputTokens: u.inputTokens, outputTokens: u.outputTokens,
         cacheReads: u.cacheReads, cacheWrites: u.cacheWrites
@@ -753,7 +810,6 @@ settings:
   token_rotation_enabled: false
 """
 
-/// "1.2M" / "456K" / "789" — compact token counts for the About usage line.
 private func formatTokens(_ n: Int) -> String {
     if n >= 1_000_000 {
         return String(format: "%.1fM", Double(n) / 1_000_000)

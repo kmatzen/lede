@@ -134,6 +134,8 @@ struct TriagePipeline {
             return Digest.Item(
                 contentHash: hash,
                 source: raw.source,
+                accountID: raw.accountID,
+                accountLabel: raw.accountLabel,
                 title: raw.title,
                 sender: raw.sender,
                 url: raw.url,

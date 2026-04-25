@@ -1,15 +1,18 @@
 import Foundation
 
 /// Upcoming events from the user's primary Google Calendar.
-/// Reuses the Gmail OAuth token — the OAuth consent screen must list
+/// Reuses the Google account's OAuth token — the consent screen lists
 /// `.../auth/calendar.readonly` alongside `gmail.metadata`.
 struct GoogleCalendarSource: NotificationSource {
+    let account: Account
     let source: Source = .calendar
 
-    var isConfigured: Bool { Keychain.get(Keychain.Key.gmailRefresh) != nil }
+    var isConfigured: Bool {
+        Keychain.get(Keychain.Key.googleRefresh(account.id)) != nil
+    }
 
     func fetch() async throws -> [RawItem] {
-        guard let token = await GoogleOAuth.validAccessToken() else { return [] }
+        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else { return [] }
 
         let now = Date()
         let in24h = now.addingTimeInterval(24 * 3600)
@@ -60,6 +63,7 @@ struct GoogleCalendarSource: NotificationSource {
         }
 
         let parsed = try JSONDecoder().decode(ListResp.self, from: data)
+        let acct = account
         let items: [RawItem] = (parsed.items ?? []).compactMap { (ev) -> RawItem? in
             guard ev.status != "cancelled" else { return nil }
             guard let summary = ev.summary, !summary.isEmpty else { return nil }
@@ -87,6 +91,8 @@ struct GoogleCalendarSource: NotificationSource {
             return RawItem(
                 id: "gcal:\(ev.id)",
                 source: .calendar,
+                accountID: acct.id,
+                accountLabel: acct.label,
                 title: summary,
                 sender: organizer,
                 snippet: snippet,

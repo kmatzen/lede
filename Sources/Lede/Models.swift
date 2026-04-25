@@ -33,10 +33,64 @@ enum Source: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// The OAuth identity that backs one or more Sources. A Google Account drives
+/// both Gmail and Calendar from a single grant; a Microsoft Account drives
+/// both Outlook and Calendar. GitHub and Slack each drive a single Source.
+enum Provider: String, Codable, CaseIterable, Identifiable {
+    case github
+    case google
+    case slack
+    case microsoft
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .github: return "GitHub"
+        case .google: return "Google"
+        case .slack: return "Slack"
+        case .microsoft: return "Microsoft"
+        }
+    }
+
+    /// Sources this provider populates.
+    var sources: [Source] {
+        switch self {
+        case .github: return [.github]
+        case .google: return [.gmail, .calendar]
+        case .slack: return [.slack]
+        case .microsoft: return [.outlook, .calendar]
+        }
+    }
+}
+
+/// One OAuth grant, identified by its provider-stable id (Gmail address,
+/// GitHub login, Slack team_id, Microsoft user objectId). The user can have
+/// multiple Accounts of the same Provider — e.g. personal + work Google.
+struct Account: Codable, Hashable, Identifiable {
+    let provider: Provider
+    let id: String              // provider-stable id, used as keychain suffix
+    var label: String           // human-readable: email address, workspace name, etc.
+    let connectedAt: Date
+
+    /// Composite key used to namespace per-account state (Keychain entries,
+    /// SourceState dictionaries). Stable across renames of `label`.
+    var key: String { "\(provider.rawValue):\(id)" }
+}
+
+/// On-disk registry of every connected Account.
+struct AccountsRegistry: Codable {
+    var accounts: [Account] = []
+}
+
 /// Raw item pulled from a source before any LLM processing.
 struct RawItem: Codable, Hashable {
     let id: String              // stable source-local id
     let source: Source
+    /// Account this item came from. Optional only because pre-migration code
+    /// paths may construct items without an account; new code always sets it.
+    let accountID: String?
+    let accountLabel: String?
     let title: String
     let sender: String?
     let snippet: String         // plain text, truncated upstream
@@ -44,10 +98,13 @@ struct RawItem: Codable, Hashable {
     let receivedAt: Date
     let isUnread: Bool
 
-    /// Stable hash over semantic content. Used to cache summaries so unchanged items are never re-summarized.
+    /// Stable hash over semantic content. Mixes in accountID so an identical
+    /// message that lands in two different accounts produces two distinct
+    /// items in the digest (rather than one collapsing on top of the other).
     var contentHash: String {
         var hasher = SHA256()
         hasher.update(data: Data(source.rawValue.utf8))
+        hasher.update(data: Data((accountID ?? "").utf8))
         hasher.update(data: Data(id.utf8))
         hasher.update(data: Data(title.utf8))
         hasher.update(data: Data((sender ?? "").utf8))
@@ -66,7 +123,8 @@ struct ItemTriage: Codable, Hashable {
 }
 
 /// Per-source health snapshot — surfaced in Settings so the user can see at
-/// a glance whether each connection is actually working.
+/// a glance whether each connection is actually working. Now keyed per
+/// (account, source) so a failure on Work Gmail doesn't mask Personal Gmail.
 struct SourceState: Codable, Equatable {
     var lastFetchedAt: Date?
     var lastItemCount: Int = 0
@@ -102,6 +160,10 @@ struct Digest: Codable {
         var id: String { contentHash }
         let contentHash: String
         let source: Source
+        /// Optional only for backward-compat with last_digest.json files
+        /// written before multi-account support landed.
+        let accountID: String?
+        let accountLabel: String?
         let title: String
         let sender: String?
         let url: URL?

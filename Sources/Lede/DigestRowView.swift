@@ -2,6 +2,10 @@ import SwiftUI
 
 struct DigestRowView: View {
     let item: Digest.Item
+    /// When true, show the account label after the source name. Caller passes
+    /// true only for sources where the user has multiple accounts connected,
+    /// so single-account users see no extra clutter.
+    var showAccountLabel: Bool = false
     var onDismiss: (() -> Void)? = nil
 
     @State private var hovering = false
@@ -17,6 +21,13 @@ struct DigestRowView: View {
                     Text(item.source.displayName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if showAccountLabel, let label = item.accountLabel {
+                        Text("· \(label)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     if let sender = item.sender {
                         Text("· \(sender)")
                             .font(.caption)

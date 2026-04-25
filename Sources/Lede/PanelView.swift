@@ -99,18 +99,35 @@ struct PanelView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Aggregates per-(account, source) state down to one entry per Source,
+    /// summing item counts across accounts. Empty if no source has fetched.
+    private var aggregatedSourceCounts: [(Source, Int)] {
+        var totals: [Source: Int] = [:]
+        for (key, state) in engine.sourceStates {
+            guard state.lastFetchedAt != nil else { continue }
+            // key = "<provider>:<accountID>:<source.rawValue>"
+            guard let lastSegment = key.split(separator: ":").last,
+                  let s = Source(rawValue: String(lastSegment)) else { continue }
+            totals[s, default: 0] += state.lastItemCount
+        }
+        return Source.allCases.compactMap { s in
+            guard let n = totals[s] else { return nil }
+            return (s, n)
+        }
+    }
+
     /// One-line digest of how each source is doing — visible only in the
     /// caught-up state, where the user might wonder "did anything actually run?"
+    /// Sums counts across all accounts of a source.
     @ViewBuilder
     private var sourceCountsLine: some View {
-        let connected = Source.allCases.filter { engine.sourceStates[$0]?.lastFetchedAt != nil }
-        if !connected.isEmpty {
+        let entries = aggregatedSourceCounts
+        if !entries.isEmpty {
             HStack(spacing: 10) {
-                ForEach(connected) { source in
-                    let state = engine.sourceStates[source]
+                ForEach(entries, id: \.0) { source, count in
                     HStack(spacing: 3) {
                         Text(source.displayName).foregroundStyle(.secondary)
-                        Text("\(state?.lastItemCount ?? 0)").foregroundStyle(.tertiary).monospacedDigit()
+                        Text("\(count)").foregroundStyle(.tertiary).monospacedDigit()
                     }
                 }
             }
@@ -119,8 +136,21 @@ struct PanelView: View {
         }
     }
 
+    /// Sources where the user has 2+ accounts connected — those rows show an
+    /// account label so the user can tell "personal Gmail" from "work Gmail".
+    private var multiAccountSources: Set<Source> {
+        var counts: [Source: Int] = [:]
+        for account in engine.accounts {
+            for source in account.provider.sources {
+                counts[source, default: 0] += 1
+            }
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
     private func digestList(_ d: Digest) -> some View {
-        ScrollView {
+        let multi = multiAccountSources
+        return ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let s = d.synthesis {
                     synthesisBox(s)
@@ -128,7 +158,8 @@ struct PanelView: View {
                 ForEach(PriorityTier.all) { tier in
                     let items = d.items.filter { tier.range.contains($0.score) }
                     if !items.isEmpty {
-                        TierSection(tier: tier, items: items, onDismiss: dismiss)
+                        TierSection(tier: tier, items: items,
+                                    multiAccountSources: multi, onDismiss: dismiss)
                     }
                 }
                 footer(d)
@@ -265,13 +296,18 @@ struct PriorityTier: Identifiable {
 struct TierSection: View {
     let tier: PriorityTier
     let items: [Digest.Item]
+    let multiAccountSources: Set<Source>
     let onDismiss: (String) -> Void
 
     @AppStorage private var expanded: Bool
 
-    init(tier: PriorityTier, items: [Digest.Item], onDismiss: @escaping (String) -> Void) {
+    init(tier: PriorityTier,
+         items: [Digest.Item],
+         multiAccountSources: Set<Source> = [],
+         onDismiss: @escaping (String) -> Void) {
         self.tier = tier
         self.items = items
+        self.multiAccountSources = multiAccountSources
         self.onDismiss = onDismiss
         self._expanded = AppStorage(
             wrappedValue: tier.defaultExpanded,
@@ -305,7 +341,11 @@ struct TierSection: View {
             if expanded {
                 VStack(spacing: 6) {
                     ForEach(items) { item in
-                        DigestRowView(item: item, onDismiss: { onDismiss(item.contentHash) })
+                        DigestRowView(
+                            item: item,
+                            showAccountLabel: multiAccountSources.contains(item.source),
+                            onDismiss: { onDismiss(item.contentHash) }
+                        )
                             .transition(.asymmetric(
                                 insertion: .opacity.combined(with: .move(edge: .top)),
                                 removal: .opacity.combined(with: .scale(scale: 0.98))

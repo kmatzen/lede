@@ -4,9 +4,11 @@ import CryptoKit
 
 /// Slack OAuth 2.0 (v2) — user token, loopback redirect.
 ///
-/// Client ID + Secret are user-supplied (unlike Google's Desktop-app OAuth,
-/// Slack considers client secrets private). Create an app from
-/// Resources/slack-app-manifest.yml and paste its creds in Settings.
+/// Each Slack workspace requires its own app registration (Slack doesn't allow
+/// generic third-party reading apps). The user pastes the workspace's client
+/// id + secret from the manifest at Resources/slack-app-manifest.yml; those
+/// creds + the resulting access token are persisted per-workspace, keyed by
+/// the team id discovered during OAuth.
 enum SlackOAuth {
     static let authorizeURL = URL(string: "https://slack.com/oauth/v2/authorize")!
     static let tokenURL = URL(string: "https://slack.com/api/oauth.v2.access")!
@@ -18,18 +20,17 @@ enum SlackOAuth {
         let authed_user: AuthedUser?
         let team: Team?
         struct AuthedUser: Decodable { let id: String?; let access_token: String? }
-        struct Team: Decodable { let id: String? }
+        struct Team: Decodable { let id: String?; let name: String? }
     }
 
-    /// Returns the user access token, user_id, and team_id so the source can
-    /// resolve @mentions and build deep-links.
-    struct Credentials {
-        let accessToken: String
+    struct ConnectResult {
+        let teamID: String          // Account.id
+        let teamName: String        // Account.label
         let userID: String?
-        let teamID: String?
+        let accessToken: String
     }
 
-    static func connect(clientID: String, clientSecret: String) async throws -> Credentials {
+    static func connect(clientID: String, clientSecret: String) async throws -> ConnectResult {
         let server = LoopbackOAuthServer()
         let port = try await server.start()
         defer { server.stop() }
@@ -74,26 +75,35 @@ enum SlackOAuth {
                                   String(data: data, encoding: .utf8) ?? "")
         }
         let parsed = try JSONDecoder().decode(AuthResponse.self, from: data)
-        guard parsed.ok, let token = parsed.authed_user?.access_token else {
+        guard parsed.ok,
+              let token = parsed.authed_user?.access_token,
+              let teamID = parsed.team?.id else {
             throw OAuthError.http(400, parsed.error ?? "unknown Slack error")
         }
-        return Credentials(
-            accessToken: token,
+        return ConnectResult(
+            teamID: teamID,
+            teamName: parsed.team?.name ?? teamID,
             userID: parsed.authed_user?.id,
-            teamID: parsed.team?.id
+            accessToken: token
         )
     }
 
-    static func persist(_ c: Credentials) {
-        Keychain.set(c.accessToken, for: Keychain.Key.slackAccess)
-        if let u = c.userID { Keychain.set(u, for: Keychain.Key.slackUserID) }
-        if let t = c.teamID { Keychain.set(t, for: Keychain.Key.slackTeamID) }
+    /// Persist per-workspace creds. The clientID/secret are kept too because
+    /// each workspace has its own pair and we need them for any future re-auth.
+    static func persist(_ r: ConnectResult, clientID: String, clientSecret: String) {
+        Keychain.set(r.accessToken, for: Keychain.Key.slackAccess(r.teamID))
+        Keychain.set(clientID, for: Keychain.Key.slackClientID(r.teamID))
+        Keychain.set(clientSecret, for: Keychain.Key.slackClientSecret(r.teamID))
+        if let u = r.userID {
+            Keychain.set(u, for: Keychain.Key.slackUserID(r.teamID))
+        }
     }
 
-    static func signOut() {
-        Keychain.delete(Keychain.Key.slackAccess)
-        Keychain.delete(Keychain.Key.slackUserID)
-        Keychain.delete(Keychain.Key.slackTeamID)
+    static func signOut(accountID: String) {
+        Keychain.delete(Keychain.Key.slackAccess(accountID))
+        Keychain.delete(Keychain.Key.slackClientID(accountID))
+        Keychain.delete(Keychain.Key.slackClientSecret(accountID))
+        Keychain.delete(Keychain.Key.slackUserID(accountID))
     }
 
     private static func randomHex(_ bytes: Int) -> String {
@@ -104,27 +114,31 @@ enum SlackOAuth {
 }
 
 struct SlackSource: NotificationSource {
+    let account: Account
     let source: Source = .slack
 
-    var isConfigured: Bool { Keychain.get(Keychain.Key.slackAccess) != nil }
+    var isConfigured: Bool {
+        Keychain.get(Keychain.Key.slackAccess(account.id)) != nil
+    }
 
     func fetch() async throws -> [RawItem] {
-        guard let token = Keychain.get(Keychain.Key.slackAccess) else { return [] }
-        let userID = Keychain.get(Keychain.Key.slackUserID)
-        let teamID = Keychain.get(Keychain.Key.slackTeamID)
+        guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return [] }
+        let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
+        let teamID = account.id
 
         // Pull every conversation the user participates in (paginated), then
         // only look at the ones with unread messages. Keeps volume bounded.
         let convos = try await Self.allConversations(token: token)
         let unread = convos.filter { ($0.unread_count_display ?? 0) > 0 }
-        Log.info("slack: \(convos.count) conversation(s), \(unread.count) unread")
+        Log.info("slack[\(account.label)]: \(convos.count) conversation(s), \(unread.count) unread")
         let users = await Self.userNameCache(token: token)
+        let acct = account
 
         return try await withThrowingTaskGroup(of: RawItem?.self) { group in
             for c in unread {
                 group.addTask {
                     try await Self.buildItem(channel: c, token: token, users: users,
-                                             userID: userID, teamID: teamID)
+                                             userID: userID, teamID: teamID, account: acct)
                 }
             }
             var out: [RawItem] = []
@@ -227,7 +241,8 @@ struct SlackSource: NotificationSource {
                                   token: String,
                                   users: [String: String],
                                   userID: String?,
-                                  teamID: String?) async throws -> RawItem? {
+                                  teamID: String,
+                                  account: Account) async throws -> RawItem? {
         var comps = URLComponents(string: "https://slack.com/api/conversations.history")!
         comps.queryItems = [
             .init(name: "channel", value: channel.id),
@@ -268,10 +283,9 @@ struct SlackSource: NotificationSource {
 
         // Direct-link that opens the Slack desktop app at the message:
         //   slack://channel?team=T123&id=C456&message=1700000000.000100
-        // Fall back to web URL if we don't have team id.
         let url: URL? = {
             var parts: [URLQueryItem] = [
-                .init(name: "team", value: teamID ?? ""),
+                .init(name: "team", value: teamID),
                 .init(name: "id", value: channel.id),
             ]
             if let ts = msg.ts { parts.append(.init(name: "message", value: ts)) }
@@ -285,6 +299,8 @@ struct SlackSource: NotificationSource {
         return RawItem(
             id: "\(channel.id):\(msg.ts ?? "")",
             source: .slack,
+            accountID: account.id,
+            accountLabel: account.label,
             title: channelName,
             sender: sender,
             snippet: String(snippet.prefix(500)),

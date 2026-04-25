@@ -23,6 +23,14 @@ enum GitHubOAuth {
         case error(String)
     }
 
+    /// (provider-stable id, human-readable label) returned by `identity(token:)`.
+    /// For GitHub these are both the user's login, but the type stays parallel
+    /// to the other providers' identity discovery.
+    struct Identity {
+        let id: String
+        let label: String
+    }
+
     static let scopes = "notifications"
 
     /// The Lede OAuth App's public Client ID. Safe to embed — Client IDs are
@@ -102,11 +110,41 @@ enum GitHubOAuth {
         }
     }
 
-    static func persist(_ token: String) {
-        Keychain.set(token, for: Keychain.Key.githubAccess)
+    /// GET /user → discover the login (used as Account.id) and a label. Called
+    /// after a successful token exchange (device flow OR PAT save) so we know
+    /// which Account to file the credential under.
+    static func identity(token: String) async throws -> Identity {
+        var req = URLRequest(url: URL(string: "https://api.github.com/user")!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("Lede/0.1", forHTTPHeaderField: "User-Agent")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw OAuthError.http((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                  String(data: data, encoding: .utf8) ?? "")
+        }
+        struct User: Decodable { let login: String; let name: String? }
+        let u = try JSONDecoder().decode(User.self, from: data)
+        let label = (u.name?.isEmpty == false ? u.name! : u.login)
+        return Identity(id: u.login, label: label)
     }
 
-    static func signOut() {
-        Keychain.delete(Keychain.Key.githubAccess)
+    static func persistOAuth(token: String, accountID: String) {
+        Keychain.set(token, for: Keychain.Key.githubAccess(accountID))
+    }
+
+    static func persistPAT(token: String, accountID: String) {
+        Keychain.set(token, for: Keychain.Key.githubPAT(accountID))
+    }
+
+    static func signOut(accountID: String) {
+        Keychain.delete(Keychain.Key.githubAccess(accountID))
+        Keychain.delete(Keychain.Key.githubPAT(accountID))
+    }
+
+    /// Read whichever credential exists (OAuth bearer first, PAT fallback).
+    static func token(forAccount accountID: String) -> String? {
+        Keychain.get(Keychain.Key.githubAccess(accountID))
+            ?? Keychain.get(Keychain.Key.githubPAT(accountID))
     }
 }

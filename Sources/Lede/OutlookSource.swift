@@ -28,6 +28,11 @@ enum MicrosoftOAuth {
         let expires_in: Int?
     }
 
+    struct Identity {
+        let id: String          // Graph user id (immutable) — Account.id
+        let label: String       // userPrincipalName / email — UI label
+    }
+
     static func connect() async throws -> Tokens {
         let server = LoopbackOAuthServer()
         let port = try await server.start()
@@ -78,34 +83,54 @@ enum MicrosoftOAuth {
         return try await postForm(tokenURL, form: form)
     }
 
-    static func persist(_ t: Tokens) {
-        Keychain.set(t.access_token, for: Keychain.Key.outlookAccess)
-        if let r = t.refresh_token {
-            Keychain.set(r, for: Keychain.Key.outlookRefresh)
+    static func identity(accessToken: String) async throws -> Identity {
+        var req = URLRequest(url: URL(string: "https://graph.microsoft.com/v1.0/me")!)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw OAuthError.http((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                  String(data: data, encoding: .utf8) ?? "")
         }
-        let expiry = Date().addingTimeInterval(Double(t.expires_in ?? 3000))
-        Keychain.set(ISO8601DateFormatter().string(from: expiry), for: Keychain.Key.outlookExpiry)
+        struct Me: Decodable {
+            let id: String
+            let userPrincipalName: String?
+            let mail: String?
+            let displayName: String?
+        }
+        let me = try JSONDecoder().decode(Me.self, from: data)
+        let label = me.mail ?? me.userPrincipalName ?? me.displayName ?? me.id
+        return Identity(id: me.id, label: label)
     }
 
-    static func validAccessToken() async -> String? {
-        guard let access = Keychain.get(Keychain.Key.outlookAccess) else { return nil }
-        let expiryStr = Keychain.get(Keychain.Key.outlookExpiry)
+    static func persist(_ t: Tokens, accountID: String) {
+        Keychain.set(t.access_token, for: Keychain.Key.microsoftAccess(accountID))
+        if let r = t.refresh_token {
+            Keychain.set(r, for: Keychain.Key.microsoftRefresh(accountID))
+        }
+        let expiry = Date().addingTimeInterval(Double(t.expires_in ?? 3000))
+        Keychain.set(ISO8601DateFormatter().string(from: expiry),
+                     for: Keychain.Key.microsoftExpiry(accountID))
+    }
+
+    static func validAccessToken(accountID: String) async -> String? {
+        guard let access = Keychain.get(Keychain.Key.microsoftAccess(accountID)) else { return nil }
+        let expiryStr = Keychain.get(Keychain.Key.microsoftExpiry(accountID))
         let expiry = expiryStr.flatMap { ISO8601DateFormatter().date(from: $0) } ?? .distantPast
         if Date() < expiry.addingTimeInterval(-60) { return access }
-        guard let r = Keychain.get(Keychain.Key.outlookRefresh) else { return access }
+        guard let r = Keychain.get(Keychain.Key.microsoftRefresh(accountID)) else { return access }
         do {
             let t = try await refresh(refreshToken: r)
-            persist(t)
+            persist(t, accountID: accountID)
             return t.access_token
         } catch {
             return access
         }
     }
 
-    static func signOut() {
-        Keychain.delete(Keychain.Key.outlookAccess)
-        Keychain.delete(Keychain.Key.outlookRefresh)
-        Keychain.delete(Keychain.Key.outlookExpiry)
+    static func signOut(accountID: String) {
+        Keychain.delete(Keychain.Key.microsoftAccess(accountID))
+        Keychain.delete(Keychain.Key.microsoftRefresh(accountID))
+        Keychain.delete(Keychain.Key.microsoftExpiry(accountID))
     }
 
     // MARK: - helpers
@@ -143,14 +168,15 @@ enum MicrosoftOAuth {
 }
 
 struct OutlookSource: NotificationSource {
+    let account: Account
     let source: Source = .outlook
 
     var isConfigured: Bool {
-        Keychain.get(Keychain.Key.outlookRefresh) != nil
+        Keychain.get(Keychain.Key.microsoftRefresh(account.id)) != nil
     }
 
     func fetch() async throws -> [RawItem] {
-        guard let token = await MicrosoftOAuth.validAccessToken() else { return [] }
+        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else { return [] }
 
         var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages")!
         comps.queryItems = [
@@ -186,6 +212,7 @@ struct OutlookSource: NotificationSource {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let parsed = try decoder.decode(ListResp.self, from: data)
+        let acct = account
         return parsed.value.map { m in
             let senderName = m.from?.emailAddress?.name
             let senderAddr = m.from?.emailAddress?.address
@@ -196,6 +223,8 @@ struct OutlookSource: NotificationSource {
             return RawItem(
                 id: m.id,
                 source: .outlook,
+                accountID: acct.id,
+                accountLabel: acct.label,
                 title: m.subject ?? "(no subject)",
                 sender: sender,
                 snippet: String((m.bodyPreview ?? "").prefix(500)),

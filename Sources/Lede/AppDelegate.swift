@@ -30,8 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // Kick off an initial refresh if credentials exist + start the
-        // 5-minute background refresh so the bell stays current.
-        Task { await engine.refreshIfConfigured() }
+        // 5-minute background refresh so the bell stays current. Account
+        // migration runs first so a single-account install gets imported into
+        // the new accounts.json registry before the first fetch.
+        Task {
+            await KeychainMigration.migrateAccountsIfNeeded(storage: storage)
+            await engine.reloadAccounts()
+            await engine.refreshIfConfigured()
+        }
         engine.startBackgroundRefresh()
 
         // Initialize Sparkle (does an initial appcast check shortly after

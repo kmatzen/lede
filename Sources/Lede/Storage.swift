@@ -12,11 +12,14 @@ actor Storage {
     private let dismissedURL: URL
     private let notifiedURL: URL
     private let sourceStateURL: URL
+    private let accountsURL: URL
     private let usageURL: URL
     private var triages: [String: ItemTriage] = [:]
     private var dismissed: Set<String> = []
     private var notified: Set<String> = []
-    private var sourceStates: [Source: SourceState] = [:]
+    /// Per-(account, source) health snapshot. Key is `Storage.stateKey`.
+    private var sourceStates: [String: SourceState] = [:]
+    private var accounts: AccountsRegistry = AccountsRegistry()
     private var usage: UsageTotals = UsageTotals()
 
     init() throws {
@@ -30,6 +33,7 @@ actor Storage {
         self.dismissedURL = dir.appendingPathComponent("dismissed.json")
         self.notifiedURL = dir.appendingPathComponent("notified.json")
         self.sourceStateURL = dir.appendingPathComponent("source_state.json")
+        self.accountsURL = dir.appendingPathComponent("accounts.json")
         self.usageURL = dir.appendingPathComponent("usage.json")
 
         if let data = try? Data(contentsOf: cacheURL),
@@ -45,8 +49,12 @@ actor Storage {
             self.notified = Set(decoded)
         }
         if let data = try? Data(contentsOf: sourceStateURL),
-           let decoded = try? JSONDecoder.iso.decode([Source: SourceState].self, from: data) {
+           let decoded = try? JSONDecoder.iso.decode([String: SourceState].self, from: data) {
             self.sourceStates = decoded
+        }
+        if let data = try? Data(contentsOf: accountsURL),
+           let decoded = try? JSONDecoder.iso.decode(AccountsRegistry.self, from: data) {
+            self.accounts = decoded
         }
         if let data = try? Data(contentsOf: usageURL),
            let decoded = try? JSONDecoder.iso.decode(UsageTotals.self, from: data) {
@@ -97,24 +105,15 @@ actor Storage {
         }
 
         // Drop SourceStates we haven't seen in 2 weeks (typically because the
-        // user disconnected the source — its dictionary entry sticks around
-        // until we sweep it).
+        // user disconnected the account/source — its dictionary entry sticks
+        // around until we sweep it).
         let stateCutoff = now.addingTimeInterval(-stateTTL)
         let statesBefore = sourceStates.count
         sourceStates = sourceStates.filter { _, state in
             (state.lastFetchedAt ?? .distantPast) > stateCutoff
         }
-        if statesBefore != sourceStates.count,
-           let data = try? JSONEncoder.iso.encode(sourceStates) {
-            try? data.write(to: sourceStateURL, options: .atomic)
-        }
-    }
-
-    /// Drop a specific source's state — used when the user disconnects.
-    func clearSourceState(_ source: Source) {
-        sourceStates.removeValue(forKey: source)
-        if let data = try? JSONEncoder.iso.encode(sourceStates) {
-            try? data.write(to: sourceStateURL, options: .atomic)
+        if statesBefore != sourceStates.count {
+            saveSourceStates()
         }
     }
 
@@ -163,12 +162,68 @@ actor Storage {
 
     // MARK: - Source health
 
-    func allSourceStates() -> [Source: SourceState] { sourceStates }
+    /// Composite key for `(account, source)` so each account's per-source
+    /// status is tracked independently. Used as the dict key for sourceStates.
+    static func stateKey(account: Account, source: Source) -> String {
+        "\(account.key):\(source.rawValue)"
+    }
 
-    func setSourceState(_ source: Source, state: SourceState) {
-        sourceStates[source] = state
+    func allSourceStates() -> [String: SourceState] { sourceStates }
+
+    func sourceState(account: Account, source: Source) -> SourceState? {
+        sourceStates[Self.stateKey(account: account, source: source)]
+    }
+
+    func setSourceState(account: Account, source: Source, state: SourceState) {
+        sourceStates[Self.stateKey(account: account, source: source)] = state
+        saveSourceStates()
+    }
+
+    /// Drop every state row for a given account — called when the account is
+    /// disconnected.
+    func clearSourceStates(forAccount account: Account) {
+        let prefix = account.key + ":"
+        sourceStates = sourceStates.filter { !$0.key.hasPrefix(prefix) }
+        saveSourceStates()
+    }
+
+    private func saveSourceStates() {
         if let data = try? JSONEncoder.iso.encode(sourceStates) {
             try? data.write(to: sourceStateURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Accounts registry
+
+    func allAccounts() -> [Account] { accounts.accounts }
+
+    func accounts(forProvider provider: Provider) -> [Account] {
+        accounts.accounts.filter { $0.provider == provider }
+    }
+
+    func account(matchingKey key: String) -> Account? {
+        accounts.accounts.first { $0.key == key }
+    }
+
+    /// Insert or update by Account.key. Existing entries are replaced so an
+    /// account's label can be refreshed by re-adding it.
+    func upsertAccount(_ account: Account) {
+        if let idx = accounts.accounts.firstIndex(where: { $0.key == account.key }) {
+            accounts.accounts[idx] = account
+        } else {
+            accounts.accounts.append(account)
+        }
+        saveAccounts()
+    }
+
+    func removeAccount(_ account: Account) {
+        accounts.accounts.removeAll { $0.key == account.key }
+        saveAccounts()
+    }
+
+    private func saveAccounts() {
+        if let data = try? JSONEncoder.iso.encode(accounts) {
+            try? data.write(to: accountsURL, options: .atomic)
         }
     }
 

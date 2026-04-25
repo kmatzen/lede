@@ -50,22 +50,51 @@ enum Keychain {
 
     // MARK: Well-known keys
     enum Key {
+        // Anthropic — single instance, not per-account.
         static let anthropicAPIKey = "anthropic.api_key"
         static let anthropicOAuthAccess = "anthropic.oauth.access"
         static let anthropicOAuthRefresh = "anthropic.oauth.refresh"
         static let anthropicOAuthExpiry = "anthropic.oauth.expiry"
-        static let githubPAT = "github.pat"
-        static let githubAccess = "github.oauth.access"
-        static let gmailAccess = "gmail.oauth.access"
-        static let gmailRefresh = "gmail.oauth.refresh"
-        static let gmailExpiry = "gmail.oauth.expiry"
-        static let slackClientID = "slack.client_id"
-        static let slackClientSecret = "slack.client_secret"
-        static let slackAccess = "slack.oauth.access"
-        static let slackUserID = "slack.user_id"
-        static let slackTeamID = "slack.team_id"
-        static let outlookAccess = "outlook.oauth.access"
-        static let outlookRefresh = "outlook.oauth.refresh"
-        static let outlookExpiry = "outlook.oauth.expiry"
+
+        // Per-account keys are suffixed with the account's provider-stable id
+        // (e.g. "google.oauth.access:user@gmail.com"). The colon makes the
+        // boundary unambiguous and is invalid in any of the id formats we use.
+        //
+        // Provider buckets are intentionally named after the OAuth identity,
+        // not the Source — one Google grant covers Gmail + Calendar, one
+        // Microsoft grant covers Outlook + Calendar.
+
+        static func googleAccess(_ id: String) -> String { "google.oauth.access:\(id)" }
+        static func googleRefresh(_ id: String) -> String { "google.oauth.refresh:\(id)" }
+        static func googleExpiry(_ id: String) -> String { "google.oauth.expiry:\(id)" }
+
+        static func microsoftAccess(_ id: String) -> String { "microsoft.oauth.access:\(id)" }
+        static func microsoftRefresh(_ id: String) -> String { "microsoft.oauth.refresh:\(id)" }
+        static func microsoftExpiry(_ id: String) -> String { "microsoft.oauth.expiry:\(id)" }
+
+        static func githubAccess(_ id: String) -> String { "github.oauth.access:\(id)" }
+        static func githubPAT(_ id: String) -> String { "github.pat:\(id)" }
+
+        static func slackAccess(_ id: String) -> String { "slack.oauth.access:\(id)" }
+        static func slackClientID(_ id: String) -> String { "slack.client_id:\(id)" }
+        static func slackClientSecret(_ id: String) -> String { "slack.client_secret:\(id)" }
+        static func slackUserID(_ id: String) -> String { "slack.user_id:\(id)" }
+
+        // Legacy unsuffixed keys, only read by KeychainMigration on first
+        // launch after multi-account support landed. After migration these
+        // entries are deleted from the keychain.
+        static let legacyGmailAccess = "gmail.oauth.access"
+        static let legacyGmailRefresh = "gmail.oauth.refresh"
+        static let legacyGmailExpiry = "gmail.oauth.expiry"
+        static let legacyOutlookAccess = "outlook.oauth.access"
+        static let legacyOutlookRefresh = "outlook.oauth.refresh"
+        static let legacyOutlookExpiry = "outlook.oauth.expiry"
+        static let legacyGitHubAccess = "github.oauth.access"
+        static let legacyGitHubPAT = "github.pat"
+        static let legacySlackAccess = "slack.oauth.access"
+        static let legacySlackClientID = "slack.client_id"
+        static let legacySlackClientSecret = "slack.client_secret"
+        static let legacySlackUserID = "slack.user_id"
+        static let legacySlackTeamID = "slack.team_id"
     }
 }

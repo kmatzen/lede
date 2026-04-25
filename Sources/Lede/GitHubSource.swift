@@ -1,24 +1,20 @@
 import Foundation
 
-/// Uses a personal access token (classic or fine-grained with `notifications` scope).
-/// OAuth device flow is possible but PAT gives us a working path today.
+/// Reads notifications using whichever credential is stored under the account
+/// (OAuth bearer from device flow, or a personal access token saved manually).
 struct GitHubSource: NotificationSource {
+    let account: Account
     let source: Source = .github
 
     var isConfigured: Bool {
-        Keychain.get(Keychain.Key.githubAccess) != nil ||
-        Keychain.get(Keychain.Key.githubPAT) != nil
-    }
-
-    private var token: String? {
-        Keychain.get(Keychain.Key.githubAccess) ?? Keychain.get(Keychain.Key.githubPAT)
+        GitHubOAuth.token(forAccount: account.id) != nil
     }
 
     func fetch() async throws -> [RawItem] {
-        guard let pat = token else { return [] }
+        guard let token = GitHubOAuth.token(forAccount: account.id) else { return [] }
 
         var req = URLRequest(url: URL(string: "https://api.github.com/notifications?per_page=50&all=false")!)
-        req.setValue("Bearer \(pat)", forHTTPHeaderField: "Authorization")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         req.setValue("Lede/0.1", forHTTPHeaderField: "User-Agent")
@@ -29,11 +25,14 @@ struct GitHubSource: NotificationSource {
             throw SourceError(source: source, message: "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0) \(body.prefix(200))")
         }
         let notifs = try JSONDecoder.iso.decode([GHNotification].self, from: data)
+        let acct = account
         return notifs.compactMap { n in
             let url = n.subject.url.flatMap(htmlURL)
             return RawItem(
                 id: n.id,
                 source: .github,
+                accountID: acct.id,
+                accountLabel: acct.label,
                 title: "\(n.repository.full_name): \(n.subject.title)",
                 sender: n.repository.full_name,
                 snippet: "\(n.reason) · \(n.subject.type)",

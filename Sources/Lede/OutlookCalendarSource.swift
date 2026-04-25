@@ -1,15 +1,18 @@
 import Foundation
 
 /// Upcoming events from the user's Outlook calendar via Microsoft Graph.
-/// Reuses the Outlook OAuth token — the app registration must include
+/// Reuses the Microsoft account's OAuth token — the app registration includes
 /// `Calendars.Read` delegated permission alongside `Mail.Read`.
 struct OutlookCalendarSource: NotificationSource {
+    let account: Account
     let source: Source = .calendar
 
-    var isConfigured: Bool { Keychain.get(Keychain.Key.outlookRefresh) != nil }
+    var isConfigured: Bool {
+        Keychain.get(Keychain.Key.microsoftRefresh(account.id)) != nil
+    }
 
     func fetch() async throws -> [RawItem] {
-        guard let token = await MicrosoftOAuth.validAccessToken() else { return [] }
+        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else { return [] }
 
         let now = Date()
         let in24h = now.addingTimeInterval(24 * 3600)
@@ -55,6 +58,7 @@ struct OutlookCalendarSource: NotificationSource {
 
         let decoder = JSONDecoder()
         let parsed = try decoder.decode(ListResp.self, from: data)
+        let acct = account
 
         return parsed.value.compactMap { ev in
             if ev.isCancelled == true { return nil }
@@ -82,6 +86,8 @@ struct OutlookCalendarSource: NotificationSource {
             return RawItem(
                 id: "ocal:\(ev.id)",
                 source: .calendar,
+                accountID: acct.id,
+                accountLabel: acct.label,
                 title: subject,
                 sender: organizer,
                 snippet: snippet,

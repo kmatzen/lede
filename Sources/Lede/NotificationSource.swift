@@ -1,6 +1,7 @@
 import Foundation
 
 protocol NotificationSource {
+    var account: Account { get }
     var source: Source { get }
     var isConfigured: Bool { get }
     /// Returns recent items (caller will cap + dedupe).

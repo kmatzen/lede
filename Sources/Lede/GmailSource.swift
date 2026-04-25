@@ -18,12 +18,17 @@ enum GoogleOAuth {
 
     static let authorizeURL = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
     static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
-    static let scopes = "https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/calendar.readonly"
+    static let scopes = "https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/calendar.readonly https://www.googleapis.com/auth/userinfo.email"
 
     struct Tokens: Codable {
         let access_token: String
         let refresh_token: String?
         let expires_in: Int?
+    }
+
+    struct Identity {
+        let id: String          // email — used as Account.id
+        let label: String       // email — shown in UI
     }
 
     static func connect() async throws -> Tokens {
@@ -43,7 +48,9 @@ enum GoogleOAuth {
             .init(name: "response_type", value: "code"),
             .init(name: "scope", value: scopes),
             .init(name: "access_type", value: "offline"),
-            .init(name: "prompt", value: "consent"),
+            // `consent` (not `select_account`) so a second connect on the same
+            // browser profile re-issues a refresh_token, not just an access one.
+            .init(name: "prompt", value: "consent select_account"),
             .init(name: "code_challenge", value: challenge),
             .init(name: "code_challenge_method", value: "S256"),
             .init(name: "state", value: state),
@@ -76,34 +83,51 @@ enum GoogleOAuth {
         return try await postForm(tokenURL, form: form)
     }
 
-    static func persist(_ t: Tokens) {
-        Keychain.set(t.access_token, for: Keychain.Key.gmailAccess)
-        if let r = t.refresh_token {
-            Keychain.set(r, for: Keychain.Key.gmailRefresh)
+    static func identity(accessToken: String) async throws -> Identity {
+        var req = URLRequest(url: URL(string: "https://www.googleapis.com/oauth2/v3/userinfo")!)
+        req.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            throw OAuthError.http((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                  String(data: data, encoding: .utf8) ?? "")
         }
-        let expiry = Date().addingTimeInterval(Double(t.expires_in ?? 3000))
-        Keychain.set(ISO8601DateFormatter().string(from: expiry), for: Keychain.Key.gmailExpiry)
+        struct UserInfo: Decodable { let email: String? }
+        let info = try JSONDecoder().decode(UserInfo.self, from: data)
+        guard let email = info.email, !email.isEmpty else {
+            throw OAuthError.http(400, "userinfo missing email")
+        }
+        return Identity(id: email, label: email)
     }
 
-    static func validAccessToken() async -> String? {
-        guard let access = Keychain.get(Keychain.Key.gmailAccess) else { return nil }
-        let expiryStr = Keychain.get(Keychain.Key.gmailExpiry)
+    static func persist(_ t: Tokens, accountID: String) {
+        Keychain.set(t.access_token, for: Keychain.Key.googleAccess(accountID))
+        if let r = t.refresh_token {
+            Keychain.set(r, for: Keychain.Key.googleRefresh(accountID))
+        }
+        let expiry = Date().addingTimeInterval(Double(t.expires_in ?? 3000))
+        Keychain.set(ISO8601DateFormatter().string(from: expiry),
+                     for: Keychain.Key.googleExpiry(accountID))
+    }
+
+    static func validAccessToken(accountID: String) async -> String? {
+        guard let access = Keychain.get(Keychain.Key.googleAccess(accountID)) else { return nil }
+        let expiryStr = Keychain.get(Keychain.Key.googleExpiry(accountID))
         let expiry = expiryStr.flatMap { ISO8601DateFormatter().date(from: $0) } ?? .distantPast
         if Date() < expiry.addingTimeInterval(-60) { return access }
-        guard let refresh = Keychain.get(Keychain.Key.gmailRefresh) else { return access }
+        guard let refresh = Keychain.get(Keychain.Key.googleRefresh(accountID)) else { return access }
         do {
             let t = try await refreshTokens(refreshToken: refresh)
-            persist(t)
+            persist(t, accountID: accountID)
             return t.access_token
         } catch {
             return access
         }
     }
 
-    static func signOut() {
-        Keychain.delete(Keychain.Key.gmailAccess)
-        Keychain.delete(Keychain.Key.gmailRefresh)
-        Keychain.delete(Keychain.Key.gmailExpiry)
+    static func signOut(accountID: String) {
+        Keychain.delete(Keychain.Key.googleAccess(accountID))
+        Keychain.delete(Keychain.Key.googleRefresh(accountID))
+        Keychain.delete(Keychain.Key.googleExpiry(accountID))
     }
 
     // MARK: - helpers
@@ -142,14 +166,15 @@ enum GoogleOAuth {
 // MARK: - Source implementation
 
 struct GmailSource: NotificationSource {
+    let account: Account
     let source: Source = .gmail
 
     var isConfigured: Bool {
-        Keychain.get(Keychain.Key.gmailRefresh) != nil
+        Keychain.get(Keychain.Key.googleRefresh(account.id)) != nil
     }
 
     func fetch() async throws -> [RawItem] {
-        guard let token = await GoogleOAuth.validAccessToken() else { return [] }
+        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else { return [] }
 
         // `gmail.metadata` scope forbids the `q` search param (Google: "query
         // text could expose body content"). So we filter by labelIds here —
@@ -176,23 +201,24 @@ struct GmailSource: NotificationSource {
             struct Ref: Decodable { let id: String }
         }
         let ids = (try JSONDecoder().decode(ListResp.self, from: listData).messages ?? []).map { $0.id }
-        Log.info("gmail: list returned \(ids.count) message id(s)")
+        Log.info("gmail[\(account.label)]: list returned \(ids.count) message id(s)")
 
+        let acct = account
         return try await withThrowingTaskGroup(of: RawItem?.self) { group in
             for id in ids {
-                group.addTask { try await Self.fetchMetadata(id: id, token: token) }
+                group.addTask { try await Self.fetchMetadata(id: id, token: token, account: acct) }
             }
             var out: [RawItem] = []
             var skipped = 0
             for try await item in group {
                 if let item { out.append(item) } else { skipped += 1 }
             }
-            Log.info("gmail: kept \(out.count) item(s), dropped \(skipped) by client-side filter")
+            Log.info("gmail[\(acct.label)]: kept \(out.count) item(s), dropped \(skipped) by client-side filter")
             return out
         }
     }
 
-    private static func fetchMetadata(id: String, token: String) async throws -> RawItem? {
+    private static func fetchMetadata(id: String, token: String, account: Account) async throws -> RawItem? {
         var comps = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)")!
         comps.queryItems = [
             .init(name: "format", value: "metadata"),
@@ -232,6 +258,8 @@ struct GmailSource: NotificationSource {
         return RawItem(
             id: m.id,
             source: .gmail,
+            accountID: account.id,
+            accountLabel: account.label,
             title: subject,
             sender: from,
             snippet: String((m.snippet ?? "").prefix(500)),

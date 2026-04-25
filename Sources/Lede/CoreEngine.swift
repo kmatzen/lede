@@ -7,7 +7,10 @@ final class CoreEngine: ObservableObject {
     @Published var isRefreshing = false
     @Published var lastError: String?
     @Published var lastRefreshed: Date?
-    @Published var sourceStates: [Source: SourceState] = [:]
+    /// Health snapshot keyed by `Storage.stateKey(account:source:)`. Settings
+    /// reads this; the panel doesn't.
+    @Published var sourceStates: [String: SourceState] = [:]
+    @Published var accounts: [Account] = []
     @Published var usage: UsageTotals = UsageTotals()
 
     private let storage: Storage
@@ -20,15 +23,28 @@ final class CoreEngine: ObservableObject {
             Task {
                 self.digest = await storage.loadLastDigest()
                 self.sourceStates = await storage.allSourceStates()
+                self.accounts = await storage.allAccounts()
                 self.usage = await storage.currentUsage()
                 await storage.runMaintenance()
             }
         }
     }
 
-    func clearSourceState(_ source: Source) async {
-        await storage.clearSourceState(source)
-        sourceStates.removeValue(forKey: source)
+    func reloadAccounts() async {
+        self.accounts = await storage.allAccounts()
+        self.sourceStates = await storage.allSourceStates()
+    }
+
+    func disconnectAccount(_ account: Account) async {
+        switch account.provider {
+        case .github: GitHubOAuth.signOut(accountID: account.id)
+        case .google: GoogleOAuth.signOut(accountID: account.id)
+        case .microsoft: MicrosoftOAuth.signOut(accountID: account.id)
+        case .slack: SlackOAuth.signOut(accountID: account.id)
+        }
+        await storage.removeAccount(account)
+        await storage.clearSourceStates(forAccount: account)
+        await reloadAccounts()
     }
 
     // MARK: Background refresh
@@ -82,21 +98,34 @@ final class CoreEngine: ObservableObject {
     }
 
     func hasAnySource() -> Bool {
-        enabledSources().isEmpty == false
+        accounts.isEmpty == false
     }
 
     // MARK: Sources
 
-    private func enabledSources() -> [NotificationSource] {
-        let all: [NotificationSource] = [
-            GitHubSource(),
-            GmailSource(),
-            GoogleCalendarSource(),
-            SlackSource(),
-            OutlookSource(),
-            OutlookCalendarSource(),
-        ]
-        return all.filter { $0.isConfigured && $0.source.isEnabledByUser }
+    /// Build the per-(account, source) NotificationSource impls for everything
+    /// configured + enabled. One Account expands into multiple Sources when the
+    /// provider supports them (Google → Gmail + Calendar, Microsoft → Outlook
+    /// + Calendar).
+    private func notificationSources(for accountList: [Account]) -> [NotificationSource] {
+        var out: [NotificationSource] = []
+        for account in accountList {
+            for source in account.provider.sources {
+                guard source.isEnabledByUser else { continue }
+                let s: NotificationSource
+                switch (account.provider, source) {
+                case (.github, .github): s = GitHubSource(account: account)
+                case (.google, .gmail): s = GmailSource(account: account)
+                case (.google, .calendar): s = GoogleCalendarSource(account: account)
+                case (.microsoft, .outlook): s = OutlookSource(account: account)
+                case (.microsoft, .calendar): s = OutlookCalendarSource(account: account)
+                case (.slack, .slack): s = SlackSource(account: account)
+                default: continue
+                }
+                if s.isConfigured { out.append(s) }
+            }
+        }
+        return out
     }
 
     // MARK: Anthropic auth resolution
@@ -158,42 +187,46 @@ final class CoreEngine: ObservableObject {
             return
         }
 
-        let sources = enabledSources()
+        // Re-read accounts every refresh in case the user just added one.
+        let accountList = await storage.allAccounts()
+        self.accounts = accountList
+        let sources = notificationSources(for: accountList)
         if sources.isEmpty {
             lastError = "No sources configured. Open Settings."
             Log.warn("refresh aborted: no sources configured")
             return
         }
 
-        let names = sources.map { $0.source.rawValue }.joined(separator: ",")
+        let names = sources.map { "\($0.source.rawValue)[\($0.account.label)]" }.joined(separator: ",")
         Log.info("fetching from \(sources.count) source(s): \(names)")
 
-        // Fetch all sources in parallel; ignore individual failures.
+        // Fetch all (account, source) pairs in parallel; ignore individual failures.
         var allItems: [RawItem] = []
         var sourceErrors: [String] = []
-        await withTaskGroup(of: (Source, Result<[RawItem], Error>).self) { group in
+        await withTaskGroup(of: (Account, Source, Result<[RawItem], Error>).self) { group in
             for s in sources {
                 group.addTask {
-                    do { return (s.source, .success(try await s.fetch())) }
-                    catch { return (s.source, .failure(error)) }
+                    do { return (s.account, s.source, .success(try await s.fetch())) }
+                    catch { return (s.account, s.source, .failure(error)) }
                 }
             }
-            for await (src, result) in group {
+            for await (account, src, result) in group {
+                let key = Storage.stateKey(account: account, source: src)
                 switch result {
                 case .success(let items):
-                    Log.info("\(src.rawValue): fetched \(items.count) item(s)")
+                    Log.info("\(src.rawValue)[\(account.label)]: fetched \(items.count) item(s)")
                     allItems.append(contentsOf: items)
                     let state = SourceState(lastFetchedAt: Date(), lastItemCount: items.count, lastError: nil)
-                    await storage.setSourceState(src, state: state)
-                    sourceStates[src] = state
+                    await storage.setSourceState(account: account, source: src, state: state)
+                    sourceStates[key] = state
                 case .failure(let err):
-                    Log.error("\(src.rawValue): fetch failed — \(err.localizedDescription)")
-                    sourceErrors.append("\(err.localizedDescription)")
-                    var state = sourceStates[src] ?? SourceState()
+                    Log.error("\(src.rawValue)[\(account.label)]: fetch failed — \(err.localizedDescription)")
+                    sourceErrors.append("\(account.label) · \(err.localizedDescription)")
+                    var state = sourceStates[key] ?? SourceState()
                     state.lastError = err.localizedDescription
                     state.lastFetchedAt = Date()
-                    await storage.setSourceState(src, state: state)
-                    sourceStates[src] = state
+                    await storage.setSourceState(account: account, source: src, state: state)
+                    sourceStates[key] = state
                 }
             }
         }

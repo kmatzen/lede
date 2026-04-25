@@ -7,8 +7,8 @@ final class CoreTests: XCTestCase {
 
     func testContentHashIsDeterministic() {
         let a = RawItem(
-            id: "1", source: .github, title: "PR review",
-            sender: "alice", snippet: "ready for review",
+            id: "1", source: .github, accountID: nil, accountLabel: nil,
+            title: "PR review", sender: "alice", snippet: "ready for review",
             url: nil, receivedAt: Date(timeIntervalSince1970: 0), isUnread: true
         )
         let b = a
@@ -17,27 +17,41 @@ final class CoreTests: XCTestCase {
 
     func testContentHashChangesWithSemanticFields() {
         let base = RawItem(
-            id: "1", source: .github, title: "PR review",
-            sender: "alice", snippet: "ready",
+            id: "1", source: .github, accountID: nil, accountLabel: nil,
+            title: "PR review", sender: "alice", snippet: "ready",
             url: nil, receivedAt: Date(), isUnread: true
         )
-        var titleChanged = base; titleChanged = RawItem(
-            id: base.id, source: base.source, title: "PR REVIEW (urgent)",
-            sender: base.sender, snippet: base.snippet,
+        let titleChanged = RawItem(
+            id: base.id, source: base.source, accountID: base.accountID, accountLabel: base.accountLabel,
+            title: "PR REVIEW (urgent)", sender: base.sender, snippet: base.snippet,
             url: base.url, receivedAt: base.receivedAt, isUnread: base.isUnread
         )
         XCTAssertNotEqual(base.contentHash, titleChanged.contentHash)
     }
 
     func testContentHashIgnoresReceivedAtAndUnread() {
-        // Only id/source/title/sender/snippet feed the hash. Re-fetching the
-        // same message at a different moment, or the user reading it elsewhere,
-        // shouldn't invalidate its triage cache entry.
-        let a = RawItem(id: "1", source: .gmail, title: "t", sender: "s",
-                        snippet: "x", url: nil, receivedAt: Date(timeIntervalSince1970: 0), isUnread: true)
-        let b = RawItem(id: "1", source: .gmail, title: "t", sender: "s",
-                        snippet: "x", url: nil, receivedAt: Date(timeIntervalSince1970: 9999), isUnread: false)
+        // Only id/source/accountID/title/sender/snippet feed the hash.
+        // Re-fetching the same message at a different moment, or the user
+        // reading it elsewhere, shouldn't invalidate its triage cache entry.
+        let a = RawItem(id: "1", source: .gmail, accountID: nil, accountLabel: nil,
+                        title: "t", sender: "s", snippet: "x",
+                        url: nil, receivedAt: Date(timeIntervalSince1970: 0), isUnread: true)
+        let b = RawItem(id: "1", source: .gmail, accountID: nil, accountLabel: nil,
+                        title: "t", sender: "s", snippet: "x",
+                        url: nil, receivedAt: Date(timeIntervalSince1970: 9999), isUnread: false)
         XCTAssertEqual(a.contentHash, b.contentHash)
+    }
+
+    func testContentHashSplitsByAccount() {
+        // Same message id, different accounts → distinct hashes so two
+        // accounts' identical notifications stay distinguishable in the digest.
+        let a = RawItem(id: "1", source: .gmail, accountID: "kev@personal.com", accountLabel: "kev@personal.com",
+                        title: "t", sender: "s", snippet: "x",
+                        url: nil, receivedAt: Date(), isUnread: true)
+        let b = RawItem(id: "1", source: .gmail, accountID: "kev@work.com", accountLabel: "kev@work.com",
+                        title: "t", sender: "s", snippet: "x",
+                        url: nil, receivedAt: Date(), isUnread: true)
+        XCTAssertNotEqual(a.contentHash, b.contentHash)
     }
 
     // MARK: From-header parsing
