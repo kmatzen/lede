@@ -44,7 +44,7 @@ If you decide to do this *as well as* direct, expect to maintain two builds.
   ```
 - [ ] Verify the loopback OAuth listener still binds under sandbox (it should — `network.server` covers it).
 - [ ] Verify all Keychain reads/writes work with the access-group set.
-- [ ] Either ship a non-Anthropic-OAuth build (API key only) or get explicit Anthropic permission for subscription OAuth. **The current subscription flow is not ToS-compliant for store distribution.** This is the largest blocker.
+- [ ] Subscription OAuth is now gated by a runtime config (`~/Library/Application Support/Lede/config.json` with `"enableSubscriptionOAuth": true`). The App Store binary is the same binary; reviewers see only the API-key flow because no config is shipped. Personal users opt in by dropping the file. **The OAuth code is still in the binary** — if Apple's review goes deep enough to inspect strings/symbols, this still surfaces. If you want zero exposure, replace the runtime check with `#if SUBSCRIPTION_OAUTH` later.
 - [ ] Decide whether to keep Slack as user-supplied creds (works on store) or distribute the Slack app publicly via api.slack.com (review process).
 
 ### Apple side

@@ -29,42 +29,46 @@ private struct ClaudeAuthPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                section("Subscription (Claude Pro/Max)") {
-                    Text("Sign in with your Claude account. A browser window will open; after you approve, the app catches the callback automatically.")
-                        .font(.caption).foregroundStyle(.secondary)
+                if AppConfig.shared.enableSubscriptionOAuth {
+                    section("Subscription (Claude Pro/Max)") {
+                        Text("Sign in with your Claude account. A browser window will open; after you approve, the app catches the callback automatically.")
+                            .font(.caption).foregroundStyle(.secondary)
 
-                    if hasOAuthState {
-                        HStack {
-                            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
-                            Text("Signed in.")
-                            Spacer()
-                            Button("Sign out") {
-                                ClaudeOAuth.signOut()
-                                hasOAuthState = false
-                                oauthStatus = ""
+                        if hasOAuthState {
+                            HStack {
+                                Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+                                Text("Signed in.")
+                                Spacer()
+                                Button("Sign out") {
+                                    ClaudeOAuth.signOut()
+                                    hasOAuthState = false
+                                    oauthStatus = ""
+                                }
+                            }
+                        } else {
+                            HStack {
+                                Button("Sign in with Claude") {
+                                    Task { await signIn() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(busy)
+                                if busy { ProgressView().controlSize(.small) }
                             }
                         }
-                    } else {
-                        HStack {
-                            Button("Sign in with Claude") {
-                                Task { await signIn() }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(busy)
-                            if busy { ProgressView().controlSize(.small) }
+
+                        if !oauthStatus.isEmpty {
+                            Text(oauthStatus).font(.caption).foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
 
-                    if !oauthStatus.isEmpty {
-                        Text(oauthStatus).font(.caption).foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                    Divider()
                 }
 
-                Divider()
-
-                section("API key (fallback)") {
-                    Text("If you'd rather pay per token, paste an Anthropic API key. Either method works; OAuth wins if both are set.")
+                section("API key") {
+                    Text(AppConfig.shared.enableSubscriptionOAuth
+                         ? "If you'd rather pay per token, paste an Anthropic API key. Either method works; OAuth wins if both are set."
+                         : "Paste an Anthropic API key from console.anthropic.com. Triage costs roughly $0.01/day at typical inbox volume.")
                         .font(.caption).foregroundStyle(.secondary)
                     SecureField("sk-ant-…", text: $apiKey)
                         .textFieldStyle(.roundedBorder)

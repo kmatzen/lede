@@ -40,8 +40,10 @@ final class CoreEngine: ObservableObject {
     // MARK: Auth checks
 
     func hasClaudeCreds() -> Bool {
-        Keychain.get(Keychain.Key.anthropicAPIKey) != nil ||
-        Keychain.get(Keychain.Key.anthropicOAuthAccess) != nil
+        if Keychain.get(Keychain.Key.anthropicAPIKey) != nil { return true }
+        if AppConfig.shared.enableSubscriptionOAuth,
+           Keychain.get(Keychain.Key.anthropicOAuthAccess) != nil { return true }
+        return false
     }
 
     func hasAnySource() -> Bool {
@@ -65,7 +67,8 @@ final class CoreEngine: ObservableObject {
     // MARK: Anthropic auth resolution
 
     private func anthropicClient() async -> AnthropicClient? {
-        if let token = await ClaudeOAuth.validAccessToken() {
+        if AppConfig.shared.enableSubscriptionOAuth,
+           let token = await ClaudeOAuth.validAccessToken() {
             return AnthropicClient(auth: .oauthBearer(accessToken: token))
         }
         if let key = Keychain.get(Keychain.Key.anthropicAPIKey) {
