@@ -10,12 +10,13 @@ RELEASE_APP  := $(RELEASE_DIR)/$(APP_NAME).app
 ENTITLEMENTS := Resources/Lede.entitlements
 
 # Resolve the signing identity lazily — picks up Apple Dev / Developer ID,
-# else falls through to the self-signed "Lede Dev" path.
+# else falls through to the self-signed "Lede Dev" path. Used for `make run`.
 IDENTITY = $(shell ./scripts/setup-dev-cert.sh)
 
-# For notarized release you need a Developer ID Application identity. The
-# resolver above will pick it up first if installed; you can also override:
-#   make release IDENTITY="Developer ID Application: Your Name (TEAMID)"
+# For release we strictly need a Developer ID Application identity (Apple
+# Development won't pass Gatekeeper on other Macs). Looks one up by name.
+RELEASE_IDENTITY = $(shell security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application/ { print $$2; exit }')
 
 .PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize
 
@@ -60,14 +61,19 @@ release-bundle: release
 	@cp Resources/AppIcon.icns "$(RELEASE_APP)/Contents/Resources/AppIcon.icns"
 
 release-sign: release-bundle
+	@if [ -z "$(RELEASE_IDENTITY)" ]; then \
+	    echo "error: no Developer ID Application identity in keychain"; \
+	    echo "       run: security find-identity -v -p codesigning"; \
+	    exit 1; \
+	fi
 	@codesign --force --deep \
-	    --sign "$(IDENTITY)" \
+	    --sign "$(RELEASE_IDENTITY)" \
 	    --options runtime \
 	    --entitlements $(ENTITLEMENTS) \
 	    --timestamp \
 	    "$(RELEASE_APP)"
 	@codesign -dvv "$(RELEASE_APP)" 2>&1 | grep -E 'Authority|TeamIdentifier|Identifier|flags='
-	@echo "  ✓ Signed release at $(RELEASE_APP)"
+	@echo "  ✓ Signed release at $(RELEASE_APP) with: $(RELEASE_IDENTITY)"
 
 # Submit the signed .app to Apple's notarization service. Requires a
 # notarytool keychain profile created via:
