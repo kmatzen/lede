@@ -171,7 +171,7 @@ jobs:
             ${{ steps.snippet.outputs.snippet }}
             ```
 
-      - name: Publish to appcast.xml on main
+      - name: Publish appcast + update website on main
         env:
           ATTRS: ${{ steps.sparkle.outputs.attrs }}
         run: |
@@ -179,24 +179,26 @@ jobs:
           PUBDATE=$(date -u +"%a, %d %b %Y %H:%M:%S +0000")
 
           # Switch to the tip of main, preserving untracked build artifacts.
-          # main may have moved since the tag was created; we want our edit
+          # main may have moved since the tag was created; we want our edits
           # to apply on top of whatever HEAD is now.
           git fetch origin main
           git checkout -B main origin/main
 
-          # Inserting via Python: the ATTRS string contains base64 with /+=
-          # characters, which is fragile under sed. Idempotent — if
+          # Run both edits via Python: the ATTRS string contains base64 with
+          # /+= characters that are fragile under sed. Idempotent — if
           # appcast.xml already advertises this version, the workflow
-          # replaces that <item> in place rather than duplicating it.
+          # replaces that <item> in place rather than duplicating it; the
+          # index.html regex substitutions are no-ops when re-run.
           ATTRS="$ATTRS" PUBDATE="$PUBDATE" python3 <<'PYEOF'
           import os, re
           version = os.environ["VERSION"]
           attrs = os.environ["ATTRS"]
           pubdate = os.environ["PUBDATE"]
 
-          path = "docs/appcast.xml"
-          with open(path) as f:
-              content = f.read()
+          # --- docs/appcast.xml ---------------------------------------------
+          appcast_path = "docs/appcast.xml"
+          with open(appcast_path) as f:
+              appcast = f.read()
 
           item = (
               "        <item>\n"
@@ -211,34 +213,48 @@ jobs:
               "        </item>\n"
           )
 
-          # Replace existing item for this version if present (re-runs of the
-          # same tag), otherwise insert at the top of <channel>, just before
-          # </channel>.
           existing = re.compile(
               r"        <item>\s*\n"
               r"            <title>Version " + re.escape(version) + r"</title>.*?</item>\n",
               re.DOTALL,
           )
-          if existing.search(content):
-              content = existing.sub(item, content, count=1)
+          if existing.search(appcast):
+              appcast = existing.sub(item, appcast, count=1)
               print(f"appcast: replaced existing v{version} entry")
           else:
-              content = content.replace("</channel>", item + "    </channel>", 1)
+              appcast = appcast.replace("</channel>", item + "    </channel>", 1)
               print(f"appcast: inserted v{version}")
+          with open(appcast_path, "w") as f:
+              f.write(appcast)
 
-          with open(path, "w") as f:
-              f.write(content)
+          # --- docs/index.html ----------------------------------------------
+          # Three places hard-code the version: the JSON-LD softwareVersion,
+          # the hero download URL, and the CTA download URL + button text.
+          index_path = "docs/index.html"
+          with open(index_path) as f:
+              index = f.read()
+
+          subs = [
+              (r'("softwareVersion":\s*")[\d.]+(")', r"\g<1>" + version + r"\g<2>"),
+              (r"(Lede-)[\d.]+(\.dmg)", r"\g<1>" + version + r"\g<2>"),
+              (r"(Download Lede )[\d.]+", r"\g<1>" + version),
+          ]
+          for pattern, repl in subs:
+              index, n = re.subn(pattern, repl, index)
+              print(f"index.html: {pattern} → {n} replacement(s)")
+          with open(index_path, "w") as f:
+              f.write(index)
           PYEOF
 
-          if git diff --quiet docs/appcast.xml; then
-              echo "appcast.xml unchanged — nothing to publish"
+          if git diff --quiet docs/appcast.xml docs/index.html; then
+              echo "no changes to publish"
               exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/appcast.xml
-          git commit -m "Appcast: publish v$VERSION [skip ci]"
+          git add docs/appcast.xml docs/index.html
+          git commit -m "Release v$VERSION: appcast + website [skip ci]"
           git push origin main
 
       - name: Clean up keychain
