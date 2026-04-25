@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Terms — Lede</title>
+    <meta name="description" content="Terms of use for Lede, a macOS menu-bar inbox triage app.">
+    <meta name="theme-color" content="#0d0d24">
+    <meta name="color-scheme" content="dark light">
+
+    <link rel="canonical" href="https://kmatzen.com/lede/terms.html">
+    <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="assets/favicon-16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="assets/apple-touch-icon.png">
+
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://kmatzen.com/lede/terms.html">
+    <meta property="og:title" content="Terms — Lede">
+    <meta property="og:description" content="Terms of use for Lede, a macOS menu-bar inbox triage app.">
+    <meta property="og:image" content="https://kmatzen.com/lede/assets/og-image.png">
+    <meta property="og:site_name" content="Lede">
+
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .doc { padding: 80px 0 100px; }
+        .doc h1 { font-size: 2.4rem; margin-bottom: 8px; }
+        .doc h2 { font-size: 1.4rem; margin-top: 36px; }
+        .doc h3 { font-size: 1.05rem; margin-top: 18px; color: var(--text); }
+        .doc p, .doc li { color: var(--text-muted); }
+        .doc ul, .doc ol { padding-left: 22px; line-height: 1.7; }
+        .doc strong { color: var(--text); }
+        .doc-back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px; }
+        .updated { color: var(--text-dim); font-size: 0.85rem; margin-top: 6px; }
+        .pillbox { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-top: 24px; }
+    </style>
+</head>
+<body>
+
+<section class="doc">
+    <div class="container">
+        <a class="doc-back" href="index.html">← Back to Lede</a>
+        <h1>Terms</h1>
+        <p class="updated">Last updated April 24, 2026.</p>
+
+        <p>
+            Lede is a free, open-source macOS app distributed by Kevin Blackburn-Matzen.
+            By installing or using it, you agree to the terms below. If you don't agree,
+            don't use the app. There's no account to delete and nothing to cancel —
+            just remove the app and the small amount of state it keeps locally.
+        </p>
+
+        <h2>What Lede does</h2>
+        <p>
+            Lede reads notifications and message metadata from services you connect
+            (currently Gmail, GitHub, Slack, Outlook, and Google/Outlook calendars),
+            sends short snippets of that content to Anthropic's Claude API for scoring
+            and summarization, and shows the result in a menu-bar panel.
+        </p>
+
+        <h2>Your responsibilities</h2>
+        <ul>
+            <li>
+                <strong>Bring your own keys.</strong> Lede uses your Anthropic API key
+                (or, in dev builds, your Claude subscription) for every triage call.
+                You are responsible for those costs and for keeping the key out of
+                other people's hands.
+            </li>
+            <li>
+                <strong>Honor the providers' terms.</strong> When you connect Gmail,
+                GitHub, Slack, Outlook, or any other service, your use is governed by
+                <em>their</em> terms — Lede doesn't alter or override them.
+            </li>
+            <li>
+                <strong>Use a Mac you control.</strong> Lede stores OAuth tokens in
+                the macOS Keychain. Don't install it on a shared account where another
+                user could use those tokens to access your data.
+            </li>
+            <li>
+                <strong>Don't redistribute under another name.</strong> The MIT license
+                lets you fork and modify, but please don't ship a rebrand that confuses
+                people about whether they're getting the real Lede.
+            </li>
+        </ul>
+
+        <h2>What Lede is not responsible for</h2>
+        <ul>
+            <li>
+                <strong>Third-party outages and changes.</strong> If Anthropic, Google,
+                GitHub, Slack, or Microsoft change their APIs, rate-limit you, or go
+                down, Lede may stop working until a new release lands. There's no SLA.
+            </li>
+            <li>
+                <strong>Triage accuracy.</strong> Claude's scoring is a heuristic —
+                helpful in aggregate, occasionally wrong about a specific item. Don't
+                rely on Lede as your only signal for time-critical messages.
+            </li>
+            <li>
+                <strong>Costs you incur on third-party services.</strong> Anthropic
+                bills your account directly for API usage; the providers (Google,
+                Microsoft, etc.) may impose their own quotas. Lede shows an estimate
+                in the About pane but doesn't enforce limits.
+            </li>
+            <li>
+                <strong>Data you've already sent us.</strong> We don't have a server,
+                so there's nothing for us to "delete on request." Disconnecting a
+                source removes its tokens from your Keychain immediately; quitting
+                Lede stops all activity; deleting the app removes the local cache.
+            </li>
+        </ul>
+
+        <h2>License + warranty disclaimer</h2>
+        <p>
+            Lede is released under the MIT license — see
+            <a href="https://github.com/kmatzen/lede/blob/main/LICENSE">LICENSE</a>
+            in the repo. The license disclaims warranties and limits liability;
+            those terms apply here. In short: the app is provided
+            <strong>as is</strong>, with no guarantee that it will work, won't
+            crash, or won't lose data.
+        </p>
+
+        <h2>Privacy</h2>
+        <p>
+            What Lede reads, where it sends it, and how to wipe it are described
+            in the <a href="privacy.html">privacy policy</a>. The TL;DR: the app
+            never sends data to a server we run; the only network calls go to the
+            providers you connected and to Anthropic's API.
+        </p>
+
+        <h2>Changes to these terms</h2>
+        <p>
+            If these terms change in a meaningful way, the "Last updated" date at
+            the top of this page changes too. Material changes will also be noted
+            in release notes for the version that introduces them.
+        </p>
+
+        <div class="pillbox">
+            <strong>Contact</strong><br>
+            Open an issue at <a href="https://github.com/kmatzen/lede">github.com/kmatzen/lede</a>
+            for bugs, feature requests, or questions about these terms.
+        </div>
+    </div>
+</section>
+
+<footer class="footer">
+    <div class="container footer-row">
+        <div class="footer-brand">
+            <img src="assets/icon.png" alt="" width="24" height="24">
+            <span>Lede</span>
+            <span class="footer-copyright">© 2026 Kevin Blackburn-Matzen</span>
+        </div>
+        <nav class="footer-nav">
+            <a href="https://github.com/kmatzen/lede">Source</a>
+            <a href="https://github.com/kmatzen/lede/releases">Releases</a>
+            <a href="privacy.html">Privacy</a>
+            <a href="terms.html">Terms</a>
+            <a href="https://github.com/kmatzen/lede/blob/main/LICENSE">License (MIT)</a>
+        </nav>
+    </div>
+</footer>
+
+</body>
+</html>
