@@ -73,6 +73,52 @@ actor Storage {
         save()
     }
 
+    /// One call that prunes all the rolling stores by age. Called on launch +
+    /// periodically by the engine so disk usage stays bounded.
+    func runMaintenance() {
+        let now = Date()
+        let triageTTL: TimeInterval = 30 * 86400
+        let notifiedTTL: TimeInterval = 30 * 86400
+        let stateTTL: TimeInterval = 14 * 86400
+
+        // Triages — drop entries older than 30 days.
+        let triageCutoff = now.addingTimeInterval(-triageTTL)
+        let triagesBefore = triages.count
+        triages = triages.filter { $0.value.createdAt > triageCutoff }
+        if triagesBefore != triages.count {
+            save()
+        }
+
+        // Notified set: we don't track timestamps per hash, so cap the set
+        // size instead. 5000 is plenty of buffer; older items just risk
+        // re-notifying once each, which is fine.
+        if notified.count > 5000 {
+            notified = Set(notified.suffix(5000))
+            saveNotified()
+        }
+
+        // Drop SourceStates we haven't seen in 2 weeks (typically because the
+        // user disconnected the source — its dictionary entry sticks around
+        // until we sweep it).
+        let stateCutoff = now.addingTimeInterval(-stateTTL)
+        let statesBefore = sourceStates.count
+        sourceStates = sourceStates.filter { _, state in
+            (state.lastFetchedAt ?? .distantPast) > stateCutoff
+        }
+        if statesBefore != sourceStates.count,
+           let data = try? JSONEncoder.iso.encode(sourceStates) {
+            try? data.write(to: sourceStateURL, options: .atomic)
+        }
+    }
+
+    /// Drop a specific source's state — used when the user disconnects.
+    func clearSourceState(_ source: Source) {
+        sourceStates.removeValue(forKey: source)
+        if let data = try? JSONEncoder.iso.encode(sourceStates) {
+            try? data.write(to: sourceStateURL, options: .atomic)
+        }
+    }
+
     func loadLastDigest() -> Digest? {
         guard let data = try? Data(contentsOf: digestURL) else { return nil }
         return try? JSONDecoder.iso.decode(Digest.self, from: data)

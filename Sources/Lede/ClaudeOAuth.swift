@@ -118,7 +118,7 @@ enum ClaudeOAuth {
 
     /// Byte-exact match for JavaScript URLSearchParams.toString(): spaces → `+`,
     /// reserved chars percent-encoded. Verified against Claude Code 2.1.119.
-    private static func formEncode(_ items: [(String, String)]) -> String {
+    static func formEncode(_ items: [(String, String)]) -> String {
         let allowed = CharacterSet(charactersIn:
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~*")
         return items.map { k, v in

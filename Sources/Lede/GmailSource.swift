@@ -244,7 +244,7 @@ struct GmailSource: NotificationSource {
     /// RFC 2822 From headers are typically `"Display Name" <addr@host>` or just
     /// `addr@host`. For triage we prefer the display name (more informative than
     /// an email address); fall back to the address.
-    private static func parseFromHeader(_ raw: String?) -> String? {
+    static func parseFromHeader(_ raw: String?) -> String? {
         guard let raw, !raw.isEmpty else { return nil }
         // Strip surrounding quotes, RFC 2047 encoded-words we can't decode here.
         if let lt = raw.firstIndex(of: "<") {

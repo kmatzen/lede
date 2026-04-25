@@ -10,8 +10,26 @@ enum Log {
                                   appropriateFor: nil, create: true)
         let dir = support.appendingPathComponent("Lede", isDirectory: true)
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("lede.log")
+        let url = dir.appendingPathComponent("lede.log")
+        rotateIfTooBig(url)
+        return url
     }()
+
+    /// Keep the log file from growing without bound: if it's > 5MB, truncate
+    /// to the last ~1MB. Cheap one-time check at process start.
+    private static func rotateIfTooBig(_ url: URL) {
+        let fm = FileManager.default
+        guard let attrs = try? fm.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int else { return }
+        let maxSize = 5 * 1024 * 1024
+        guard size > maxSize else { return }
+        let keep = 1 * 1024 * 1024
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        try? handle.seek(toOffset: UInt64(size - keep))
+        guard let tail = try? handle.readToEnd() else { return }
+        try? tail.write(to: url, options: .atomic)
+    }
 
     private static let queue = DispatchQueue(label: "com.lede.log", qos: .utility)
     private static let iso: ISO8601DateFormatter = {

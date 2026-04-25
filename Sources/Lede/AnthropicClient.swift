@@ -61,12 +61,32 @@ struct AnthropicClient {
     /// Send a message. `systemCached` becomes the cached system prompt.
     /// If using OAuth (subscription), we MUST prepend the Claude Code identity string
     /// as the first system block — the OAuth endpoint gates non-Claude-Code callers.
+    /// Retries once on 429, honoring Retry-After.
     func complete(
         model: String,
         systemCached: String,
         user: String,
         maxTokens: Int = 512,
         temperature: Double = 0.0
+    ) async throws -> Result {
+        do {
+            return try await sendOnce(model: model, systemCached: systemCached,
+                                      user: user, maxTokens: maxTokens, temperature: temperature)
+        } catch let AnthropicError.http(status, body) where status == 429 {
+            let waitSec = Self.parseRetryAfter(body: body) ?? 5
+            Log.warn("anthropic 429, retrying in \(waitSec)s")
+            try? await Task.sleep(nanoseconds: UInt64(waitSec) * 1_000_000_000)
+            return try await sendOnce(model: model, systemCached: systemCached,
+                                      user: user, maxTokens: maxTokens, temperature: temperature)
+        }
+    }
+
+    private func sendOnce(
+        model: String,
+        systemCached: String,
+        user: String,
+        maxTokens: Int,
+        temperature: Double
     ) async throws -> Result {
         var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
         req.httpMethod = "POST"
@@ -110,6 +130,17 @@ struct AnthropicClient {
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         let text = decoded.content.compactMap { $0.text }.joined()
         return Result(text: text, usage: decoded.usage)
+    }
+
+    /// Anthropic's 429s often include a Retry-After hint either as an integer
+    /// number of seconds (the standard) or embedded in the JSON body. Parse
+    /// what we can; fall back to a small default in the caller.
+    static func parseRetryAfter(body: String) -> Int? {
+        // body might be JSON like {"error":{"type":"rate_limit_error","message":"…retry in 7s…"}}
+        if let range = body.range(of: #"\b(\d{1,3})\s*s\b"#, options: .regularExpression) {
+            return Int(body[range].trimmingCharacters(in: .whitespaces.union(.letters)))
+        }
+        return nil
     }
 }
 

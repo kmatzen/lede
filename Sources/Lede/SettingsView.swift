@@ -25,6 +25,8 @@ private struct ClaudeAuthPane: View {
     @State private var oauthStatus: String = ""
     @State private var busy = false
     @State private var hasOAuthState: Bool = Keychain.get(Keychain.Key.anthropicOAuthAccess) != nil
+    @State private var apiKeyStatus: String = ""
+    @State private var apiKeyOK: Bool = false
 
     var body: some View {
         ScrollView {
@@ -73,13 +75,20 @@ private struct ClaudeAuthPane: View {
                     SecureField("sk-ant-…", text: $apiKey)
                         .textFieldStyle(.roundedBorder)
                     HStack {
-                        Button("Save") {
-                            if apiKey.isEmpty {
-                                Keychain.delete(Keychain.Key.anthropicAPIKey)
-                            } else {
-                                Keychain.set(apiKey, for: Keychain.Key.anthropicAPIKey)
-                            }
+                        Button("Save & validate") { Task { await saveAndValidate() } }
+                            .disabled(busy)
+                        if busy { ProgressView().controlSize(.small) }
+                        Button("Clear") {
+                            apiKey = ""
+                            Keychain.delete(Keychain.Key.anthropicAPIKey)
+                            apiKeyStatus = ""
                         }
+                    }
+                    if !apiKeyStatus.isEmpty {
+                        Text(apiKeyStatus)
+                            .font(.caption)
+                            .foregroundStyle(apiKeyOK ? .green : .orange)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -100,6 +109,34 @@ private struct ClaudeAuthPane: View {
             oauthStatus = error.localizedDescription
         }
     }
+
+    private func saveAndValidate() async {
+        busy = true
+        defer { busy = false }
+        let trimmed = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            apiKeyOK = false
+            apiKeyStatus = "Empty key — nothing to save."
+            return
+        }
+        // Round-trip a 1-token call to surface 401/403 immediately.
+        let client = AnthropicClient(auth: .apiKey(trimmed))
+        do {
+            _ = try await client.complete(
+                model: AnthropicClient.modelTriage,
+                systemCached: "You are a test prompt.",
+                user: "ping",
+                maxTokens: 1,
+                temperature: 0
+            )
+            Keychain.set(trimmed, for: Keychain.Key.anthropicAPIKey)
+            apiKeyOK = true
+            apiKeyStatus = "Validated and saved."
+        } catch {
+            apiKeyOK = false
+            apiKeyStatus = error.localizedDescription
+        }
+    }
 }
 
 // MARK: - Sources
@@ -118,6 +155,27 @@ private struct SourcesPane: View {
                 OutlookPane(engine: engine)
             }.padding(8)
         }
+    }
+}
+
+/// Toggle gating whether a configured source actually contributes to refreshes.
+/// Useful for "I'm in a meeting, stop showing me Slack" without nuking the OAuth token.
+struct SourcePauseToggle: View {
+    let source: Source
+    @State private var enabled: Bool
+
+    init(source: Source) {
+        self.source = source
+        self._enabled = State(initialValue: source.isEnabledByUser)
+    }
+
+    var body: some View {
+        Toggle("Include in refreshes", isOn: $enabled)
+            .toggleStyle(.checkbox)
+            .font(.caption)
+            .onChange(of: enabled) { _, newValue in
+                source.isEnabledByUser = newValue
+            }
     }
 }
 
@@ -166,9 +224,11 @@ private struct GitHubPane: View {
                         GitHubOAuth.signOut()
                         Keychain.delete(Keychain.Key.githubPAT)
                         connected = false
+                        Task { await engine.clearSourceState(.github) }
                     }
                 }
                 SourceHealthLine(state: engine.sourceStates[.github])
+                SourcePauseToggle(source: .github)
             } else {
                 Text("Connect via OAuth — a code appears below; click to open GitHub with it pre-filled.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -251,10 +311,16 @@ private struct GmailPane: View {
                     Button("Disconnect") {
                         GoogleOAuth.signOut()
                         connected = false
+                        Task {
+                            await engine.clearSourceState(.gmail)
+                            await engine.clearSourceState(.calendar)
+                        }
                     }
                 }
                 SourceHealthLine(state: engine.sourceStates[.gmail])
                 SourceHealthLine(state: engine.sourceStates[.calendar])
+                SourcePauseToggle(source: .gmail)
+                SourcePauseToggle(source: .calendar)
             } else {
                 Text("Reads Gmail headers + snippets (never bodies) and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -312,9 +378,11 @@ private struct SlackPane: View {
                     Button("Disconnect") {
                         SlackOAuth.signOut()
                         connected = false
+                        Task { await engine.clearSourceState(.slack) }
                     }
                 }
                 SourceHealthLine(state: engine.sourceStates[.slack])
+                SourcePauseToggle(source: .slack)
             } else {
                 Text("Create a Slack app at api.slack.com/apps — pick 'From a manifest' and paste Resources/slack-app-manifest.yml from the repo. Install to your workspace, then paste Client ID + Secret below.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -376,10 +444,15 @@ private struct OutlookPane: View {
                     Button("Disconnect") {
                         MicrosoftOAuth.signOut()
                         connected = false
+                        Task {
+                            await engine.clearSourceState(.outlook)
+                            await engine.clearSourceState(.calendar)
+                        }
                     }
                 }
                 SourceHealthLine(state: engine.sourceStates[.outlook])
                 SourceHealthLine(state: engine.sourceStates[.calendar])
+                SourcePauseToggle(source: .outlook)
             } else {
                 Text("Reads Outlook unread mail and upcoming calendar events.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -423,6 +496,10 @@ private struct AboutPane: View {
     let engine: CoreEngine
     @State private var dismissedCount: Int = 0
     @State private var launchAtLogin: Bool = LaunchAtLogin.isEnabled
+    @AppStorage("lede.refreshIntervalSeconds") private var refreshSeconds: Double = 300
+    @AppStorage("lede.quietEnabled") private var quietEnabled: Bool = false
+    @AppStorage("lede.quietStartHour") private var quietStart: Int = 22
+    @AppStorage("lede.quietEndHour") private var quietEnd: Int = 7
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -438,6 +515,38 @@ private struct AboutPane: View {
                     launchAtLogin = LaunchAtLogin.isEnabled
                 }
 
+            HStack {
+                Text("Refresh every")
+                Picker("", selection: $refreshSeconds) {
+                    Text("1 min").tag(60.0)
+                    Text("5 min").tag(300.0)
+                    Text("15 min").tag(900.0)
+                    Text("30 min").tag(1800.0)
+                    Text("Off").tag(0.0)
+                }.labelsHidden().frame(width: 100)
+            }
+            .onChange(of: refreshSeconds) { _, newValue in
+                if newValue > 0 {
+                    engine.startBackgroundRefresh(interval: newValue)
+                } else {
+                    engine.stopBackgroundRefresh()
+                }
+            }
+
+            Toggle("Quiet hours (auto-snooze notifications)", isOn: $quietEnabled)
+            if quietEnabled {
+                HStack {
+                    Text("From").font(.caption)
+                    Picker("", selection: $quietStart) {
+                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }.labelsHidden().frame(width: 80)
+                    Text("until").font(.caption)
+                    Picker("", selection: $quietEnd) {
+                        ForEach(0..<24) { Text(String(format: "%02d:00", $0)).tag($0) }
+                    }.labelsHidden().frame(width: 80)
+                }
+            }
+
             Text("Anthropic usage this month")
                 .font(.headline).padding(.top, 8)
             VStack(alignment: .leading, spacing: 4) {
@@ -445,6 +554,8 @@ private struct AboutPane: View {
                 Text("Input: \(formatTokens(u.inputTokens))   Output: \(formatTokens(u.outputTokens))")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Cache reads: \(formatTokens(u.cacheReads))   Cache writes: \(formatTokens(u.cacheWrites))")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(estimatedCost(u))
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -499,6 +610,24 @@ private func section<Content: View>(_ title: String, @ViewBuilder content: () ->
         Text(title).font(.headline)
         content()
     }
+}
+
+/// Rough $ estimate using Haiku 4.5 pricing (where most calls go).
+/// Sonnet synthesis is ~5x more expensive but contributes a small share.
+/// Numbers from anthropic.com/pricing as of April 2026.
+private func estimatedCost(_ u: UsageTotals) -> String {
+    let inPrice = 1.00 / 1_000_000.0       // Haiku 4.5 input ($/token)
+    let outPrice = 5.00 / 1_000_000.0      // Haiku 4.5 output
+    let cacheReadPrice = 0.10 / 1_000_000.0
+    let cacheWritePrice = 1.25 / 1_000_000.0
+    let dollars = Double(u.inputTokens) * inPrice
+        + Double(u.outputTokens) * outPrice
+        + Double(u.cacheReads) * cacheReadPrice
+        + Double(u.cacheWrites) * cacheWritePrice
+    if dollars < 0.01 {
+        return "Estimated cost: <$0.01 (Haiku rates)"
+    }
+    return String(format: "Estimated cost: $%.2f (Haiku rates, Sonnet synthesis adds ~10%%)", dollars)
 }
 
 /// "1.2M" / "456K" / "789" — compact token counts for the About usage line.

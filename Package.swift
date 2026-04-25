@@ -19,6 +19,11 @@ let package = Package(
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             path: "Sources/Lede"
-        )
+        ),
+        .testTarget(
+            name: "LedeTests",
+            dependencies: ["Lede"],
+            path: "Tests/LedeTests"
+        ),
     ]
 )

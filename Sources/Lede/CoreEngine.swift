@@ -20,7 +20,13 @@ final class CoreEngine: ObservableObject {
             self.digest = await storage.loadLastDigest()
             self.sourceStates = await storage.allSourceStates()
             self.usage = await storage.currentUsage()
+            await storage.runMaintenance()
         }
+    }
+
+    func clearSourceState(_ source: Source) async {
+        await storage.clearSourceState(source)
+        sourceStates.removeValue(forKey: source)
     }
 
     // MARK: Background refresh
@@ -28,10 +34,19 @@ final class CoreEngine: ObservableObject {
     /// Fire `refreshIfConfigured` every `interval` seconds so the user gets
     /// fresh triages without keeping the panel open. Throttle inside
     /// `refreshIfConfigured` (minRefreshInterval) makes back-to-back calls cheap.
-    func startBackgroundRefresh(interval: TimeInterval = 300) {
+    /// Pass `nil` (or 0) to disable background refresh entirely.
+    func startBackgroundRefresh(interval: TimeInterval? = nil) {
         backgroundTimer?.invalidate()
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshIfConfigured() }
+        backgroundTimer = nil
+        let chosen = interval ?? configuredRefreshInterval()
+        guard let chosen, chosen > 0 else { return }
+        let timer = Timer(timeInterval: chosen, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                if Schedule.inQuietHours() && !Snooze.isActive {
+                    Snooze.snooze(for: 60 * 60)  // re-arm every hour while quiet
+                }
+                await self?.refreshIfConfigured()
+            }
         }
         // Run on common modes so it keeps firing while menus / popups are up.
         RunLoop.main.add(timer, forMode: .common)
@@ -41,6 +56,17 @@ final class CoreEngine: ObservableObject {
     func stopBackgroundRefresh() {
         backgroundTimer?.invalidate()
         backgroundTimer = nil
+    }
+
+    /// Reads the user's preferred refresh cadence from UserDefaults.
+    /// 0 = disabled.
+    private func configuredRefreshInterval() -> TimeInterval? {
+        let raw = UserDefaults.standard.double(forKey: "lede.refreshIntervalSeconds")
+        if raw <= 0 {
+            // Default 5 minutes if nothing set.
+            return UserDefaults.standard.object(forKey: "lede.refreshIntervalSeconds") == nil ? 300 : nil
+        }
+        return raw
     }
 
     // MARK: Auth checks
@@ -67,7 +93,7 @@ final class CoreEngine: ObservableObject {
             OutlookSource(),
             OutlookCalendarSource(),
         ]
-        return all.filter { $0.isConfigured }
+        return all.filter { $0.isConfigured && $0.source.isEnabledByUser }
     }
 
     // MARK: Anthropic auth resolution

@@ -18,6 +18,19 @@ enum Source: String, Codable, CaseIterable, Identifiable {
         case .calendar: return "Calendar"
         }
     }
+
+    /// Per-source on/off toggle. Defaults to true so newly added sources
+    /// participate without the user having to flip a switch.
+    var isEnabledByUser: Bool {
+        get {
+            let key = "lede.source.enabled.\(rawValue)"
+            if UserDefaults.standard.object(forKey: key) == nil { return true }
+            return UserDefaults.standard.bool(forKey: key)
+        }
+        nonmutating set {
+            UserDefaults.standard.set(newValue, forKey: "lede.source.enabled.\(rawValue)")
+        }
+    }
 }
 
 /// Raw item pulled from a source before any LLM processing.
