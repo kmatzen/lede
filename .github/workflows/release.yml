@@ -111,11 +111,15 @@ jobs:
             exit 1
           fi
 
-          # `sign_update -s <key>` accepts the private key as a base64 string,
-          # bypassing the keychain — meant exactly for CI use.
-          ATTRS=$("$SIGN_UPDATE" -s "$SPARKLE_PRIVATE_KEY" "$DMG")
+          # `-f <keyfile>` reads the base64 private key from a file. Sparkle
+          # deprecated `-s <key>` (key on the argv) since recent versions
+          # because process arguments are world-readable on most systems.
+          KEY_FILE="$RUNNER_TEMP/sparkle.key"
+          umask 077
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          ATTRS=$("$SIGN_UPDATE" -f "$KEY_FILE" "$DMG")
+          rm -f "$KEY_FILE"
           echo "Sparkle attributes: $ATTRS"
-          # Persist multi-line output for the next step.
           {
             echo "attrs<<SPARKLE_EOF"
             echo "$ATTRS"
