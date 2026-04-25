@@ -259,14 +259,19 @@ final class CoreEngine: ObservableObject {
 
         // Closures hop to MainActor since CoreEngine is @MainActor; the
         // pipeline itself runs from whatever Task drives client.complete().
+        // `guard let self` first so the inner Task captures a `let` —
+        // Swift 6 strict concurrency rejects capturing the outer
+        // `[weak self]` var across the concurrent Task boundary.
         let pipeline = TriagePipeline(
             client: client,
             storage: storage,
             onClaudeCallStart: { [weak self] in
-                Task { @MainActor in self?.beginClaudeCall() }
+                guard let self else { return }
+                Task { @MainActor in self.beginClaudeCall() }
             },
             onClaudeCallEnd: { [weak self] in
-                Task { @MainActor in self?.endClaudeCall() }
+                guard let self else { return }
+                Task { @MainActor in self.endClaudeCall() }
             }
         )
         do {
