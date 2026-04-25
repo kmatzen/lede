@@ -15,6 +15,11 @@ import Foundation
 struct TriagePipeline {
     let client: AnthropicClient
     let storage: Storage
+    /// Fired immediately before / after each Anthropic API call. CoreEngine
+    /// uses this to drive the menu bar's "talking to Claude" indicator
+    /// distinctly from the broader source-fetch refresh signal.
+    var onClaudeCallStart: @Sendable () -> Void = { }
+    var onClaudeCallEnd: @Sendable () -> Void = { }
 
     /// Per-item Haiku triage output contract. Tight JSON to keep output tokens low.
     private struct TriageJSON: Codable {
@@ -208,6 +213,8 @@ struct TriagePipeline {
             SNIPPET: \(item.snippet)
             """
 
+        onClaudeCallStart()
+        defer { onClaudeCallEnd() }
         let result = try await client.complete(
             model: AnthropicClient.modelTriage,
             systemCached: Self.triageSystem,
@@ -256,6 +263,8 @@ struct TriagePipeline {
             "\(idx + 1). [\(i.source.displayName) · score \(i.score)] \(i.summary) — \(i.reason)"
         }.joined(separator: "\n")
 
+        onClaudeCallStart()
+        defer { onClaudeCallEnd() }
         let result = try await client.complete(
             model: AnthropicClient.modelSynthesis,
             systemCached: Self.synthesisSystem,

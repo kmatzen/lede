@@ -35,7 +35,7 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             .sink { [weak self] _ in self?.updateBadge() }
             .store(in: &cancellables)
 
-        engine.$isRefreshing
+        engine.$isCallingClaude
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateBadge() }
             .store(in: &cancellables)
@@ -59,15 +59,15 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     // MARK: Badge
 
     /// Menu-bar icon state, in priority order:
-    ///   refreshing      → orange bell (talking to Claude / fetching sources)
+    ///   calling Claude  → orange bell (Haiku scoring or Sonnet synthesis)
     ///   snoozed         → `bell.slash`, no count
     ///   critical (≥9)   → red `bell.badge.fill` + count
     ///   high (≥6)       → template `bell.badge` + count
     ///   medium/low (≥1) → template `bell.badge`, no count (subtle dot only)
     ///   nothing         → plain template `bell`
-    /// Refresh wins over everything so the user always knows when network is
-    /// in flight; it flips back to the digest-derived state the moment the
-    /// engine sets isRefreshing=false.
+    /// Note: orange tracks Claude calls specifically — not source HTTP
+    /// fetches. Most refreshes hit the triage cache and never call Claude,
+    /// so the bell stays its normal color through them.
     private func updateBadge() {
         guard let button = statusItem.button else { return }
 
@@ -75,10 +75,10 @@ final class MenuBarController: NSObject, NSWindowDelegate {
         let tint: NSColor?
         let title: String
 
-        if engine.isRefreshing {
+        if engine.isCallingClaude {
             // Lede's brand orange = SwiftUI .orange ≈ NSColor.systemOrange.
             // Same hue as the High-priority tier in the panel, so the user
-            // builds one mental association: "orange = working / important".
+            // builds one mental association: "orange = Claude is working".
             symbol = "bell"
             tint = .systemOrange
             title = ""

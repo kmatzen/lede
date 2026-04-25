@@ -5,6 +5,11 @@ import Combine
 final class CoreEngine: ObservableObject {
     @Published var digest: Digest?
     @Published var isRefreshing = false
+    /// True only while at least one Anthropic API call is in flight. Distinct
+    /// from isRefreshing (which covers source HTTP fetches too) so the menu
+    /// bar can show orange specifically for "talking to Claude" — most
+    /// refreshes hit the triage cache and never call Claude at all.
+    @Published var isCallingClaude = false
     @Published var lastError: String?
     @Published var lastRefreshed: Date?
     /// Health snapshot keyed by `Storage.stateKey(account:source:)`. Settings
@@ -16,6 +21,20 @@ final class CoreEngine: ObservableObject {
     private let storage: Storage
     private var minRefreshInterval: TimeInterval = 60
     private var backgroundTimer: Timer?
+    /// Inflight count of Anthropic calls. The Bool published above tracks
+    /// `counter > 0` so subscribers see clean on/off transitions even when
+    /// multiple calls overlap (Sonnet during ongoing Haiku calls, etc.).
+    private var claudeCallsInflight: Int = 0
+
+    fileprivate func beginClaudeCall() {
+        claudeCallsInflight += 1
+        if !isCallingClaude { isCallingClaude = true }
+    }
+
+    fileprivate func endClaudeCall() {
+        claudeCallsInflight = max(0, claudeCallsInflight - 1)
+        if claudeCallsInflight == 0 { isCallingClaude = false }
+    }
 
     init(storage: Storage, autoload: Bool = true) {
         self.storage = storage
@@ -238,7 +257,18 @@ final class CoreEngine: ObservableObject {
             return
         }
 
-        let pipeline = TriagePipeline(client: client, storage: storage)
+        // Closures hop to MainActor since CoreEngine is @MainActor; the
+        // pipeline itself runs from whatever Task drives client.complete().
+        let pipeline = TriagePipeline(
+            client: client,
+            storage: storage,
+            onClaudeCallStart: { [weak self] in
+                Task { @MainActor in self?.beginClaudeCall() }
+            },
+            onClaudeCallEnd: { [weak self] in
+                Task { @MainActor in self?.endClaudeCall() }
+            }
+        )
         do {
             let digest = try await pipeline.run(items: allItems)
             self.digest = digest
