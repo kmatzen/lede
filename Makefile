@@ -18,7 +18,10 @@ IDENTITY = $(shell ./scripts/setup-dev-cert.sh)
 RELEASE_IDENTITY = $(shell security find-identity -v -p codesigning 2>/dev/null \
     | awk -F'"' '/Developer ID Application/ { print $$2; exit }')
 
-.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize
+.PHONY: all build bundle sign run clean reset-cert release release-bundle release-sign notarize dmg
+
+VERSION ?= 0.1
+DMG := $(RELEASE_DIR)/Lede-$(VERSION).dmg
 
 all: run
 
@@ -84,6 +87,26 @@ notarize: release-sign
 	    ditto -c -k --keepParent "$(APP_NAME).app" "$(APP_NAME).zip" && \
 	    xcrun notarytool submit "$(APP_NAME).zip" --keychain-profile lede-notary --wait && \
 	    xcrun stapler staple "$(APP_NAME).app"
+
+# Bundle the notarized .app into a distributable .dmg with an Applications
+# drop-target. Run `make dmg VERSION=0.2.0` to bake the version into the name.
+dmg: notarize
+	@rm -f "$(DMG)"
+	@create-dmg \
+	    --volname "Lede" \
+	    --volicon "Resources/AppIcon.icns" \
+	    --window-size 540 380 \
+	    --icon-size 128 \
+	    --icon "$(APP_NAME).app" 140 190 \
+	    --hide-extension "$(APP_NAME).app" \
+	    --app-drop-link 400 190 \
+	    "$(DMG)" \
+	    "$(RELEASE_APP)"
+	@echo "  ✓ Wrote $(DMG)"
+	@codesign --sign "$(RELEASE_IDENTITY)" --timestamp "$(DMG)"
+	@xcrun notarytool submit "$(DMG)" --keychain-profile lede-notary --wait
+	@xcrun stapler staple "$(DMG)"
+	@spctl -a -vvv -t open --context context:primary-signature "$(DMG)" 2>&1 | tail -3
 
 clean:
 	swift package clean
