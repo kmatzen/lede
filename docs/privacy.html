@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lede — Privacy</title>
+    <link rel="icon" type="image/png" href="assets/icon.png">
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .doc { padding: 80px 0 100px; }
+        .doc h1 { font-size: 2.4rem; margin-bottom: 8px; }
+        .doc h2 { font-size: 1.4rem; margin-top: 36px; }
+        .doc h3 { font-size: 1.05rem; margin-top: 18px; color: var(--text); }
+        .doc p, .doc li { color: var(--text-muted); }
+        .doc ul { padding-left: 22px; line-height: 1.7; }
+        .doc strong { color: var(--text); }
+        .doc-back { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px; }
+        .updated { color: var(--text-dim); font-size: 0.85rem; margin-top: 6px; }
+        .pillbox { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; margin-top: 24px; }
+    </style>
+</head>
+<body>
+
+<section class="doc">
+    <div class="container">
+        <a class="doc-back" href="index.html">← Back to Lede</a>
+        <h1>Privacy</h1>
+        <p class="updated">Last updated April 24, 2026.</p>
+
+        <p>Lede is a personal triage tool. Our default posture is: as little data as possible, kept on your Mac, never shared with us.</p>
+
+        <h2>What Lede reads</h2>
+        <p>When you connect a source, Lede reads only what's needed to summarize:</p>
+        <ul>
+            <li><strong>GitHub</strong> — your unread notifications via the GitHub REST API. Repository metadata, notification reasons, subject titles. Lede does not read repository contents.</li>
+            <li><strong>Gmail</strong> — message <strong>headers</strong> (<code>From</code>, <code>Subject</code>, <code>Date</code>, labels) and the short server-generated <code>snippet</code>. Lede uses the <code>gmail.metadata</code> OAuth scope, which means it cannot read message bodies or attachments.</li>
+            <li><strong>Slack</strong> — channel and DM metadata, and the most recent message of any conversation flagged unread by Slack. Read using user-level OAuth scopes (no bot token).</li>
+            <li><strong>Outlook (Microsoft Graph)</strong> — unread inbox messages: subject, from, body preview, received date.</li>
+            <li><strong>Calendars</strong> — upcoming events for the next 24 hours: title, start time, organizer, your RSVP status.</li>
+        </ul>
+
+        <h2>Where Lede sends data</h2>
+        <p>Two places, and only two:</p>
+        <ol>
+            <li><strong>The provider's API</strong> (GitHub, Google, Slack, Microsoft) over HTTPS — this is unavoidable to fetch the data in the first place.</li>
+            <li><strong>Anthropic's <code>/v1/messages</code> API</strong> — the title, sender, and snippet of each item is sent to Anthropic's Claude model so it can score importance and write a one-line summary. Anthropic's privacy policy applies to this leg: <a href="https://www.anthropic.com/legal/privacy">anthropic.com/legal/privacy</a>.</li>
+        </ol>
+        <p>Nothing else leaves your Mac. Lede has no analytics, no telemetry, no crash reporting service, no CDN — it's a single Swift app that talks to four providers and Anthropic.</p>
+
+        <h2>Where data is stored</h2>
+        <p>Locally, in <code>~/Library/Application Support/Lede/</code>:</p>
+        <ul>
+            <li><code>triage_cache.json</code> — the score and one-line summary for items you've seen, keyed by content hash. Capped to 30 days.</li>
+            <li><code>last_digest.json</code> — the most recent digest the panel renders.</li>
+            <li><code>dismissed.json</code> — content hashes you clicked Dismiss on.</li>
+            <li><code>notified.json</code> — content hashes Lede has already shown a notification for, so banners don't repeat.</li>
+            <li><code>source_state.json</code> — last fetch time, item count, last error per source.</li>
+            <li><code>usage.json</code> — running monthly token usage for cost transparency.</li>
+            <li><code>lede.log</code> — recent diagnostics. Truncated to ~1MB.</li>
+        </ul>
+        <p>Auth tokens (Anthropic API key, GitHub token, Google refresh token, Slack token, Microsoft refresh token) live in the macOS Keychain under service <code>com.lede.app</code>. Standard macOS access control applies — only Lede can read them.</p>
+
+        <h2>What Lede does not do</h2>
+        <ul>
+            <li>No analytics. There is no third-party SDK for tracking, performance, attribution, or anything like it.</li>
+            <li>No data sharing. Lede has no server.</li>
+            <li>No background reading without your consent. If you Disconnect a source in Settings, the OAuth token is deleted from your Keychain immediately.</li>
+        </ul>
+
+        <h2>Your data, your call</h2>
+        <ul>
+            <li><strong>Disconnecting</strong> a source (Settings → Sources → Disconnect) revokes Lede's access to that account and deletes the token from your Keychain.</li>
+            <li><strong>Reset dismissals</strong> (Settings → About) clears the dismissed-item set.</li>
+            <li><strong>Quitting</strong> Lede stops all activity. Removing the app from <code>/Applications</code> and deleting <code>~/Library/Application Support/Lede/</code> removes everything Lede ever wrote.</li>
+        </ul>
+
+        <div class="pillbox">
+            <strong>Contact</strong><br>
+            If you find a bug or have a privacy question, open an issue at <a href="https://github.com/kmatzen/lede">github.com/kmatzen/lede</a>.
+        </div>
+    </div>
+</section>
+
+<footer class="footer">
+    <div class="container footer-row">
+        <div class="footer-brand">
+            <img src="assets/icon.png" alt="" width="24" height="24">
+            <span>Lede</span>
+        </div>
+        <nav class="footer-nav">
+            <a href="https://github.com/kmatzen/lede">Source</a>
+            <a href="https://github.com/kmatzen/lede/releases">Releases</a>
+            <a href="privacy.html">Privacy</a>
+            <a href="https://github.com/kmatzen/lede/blob/main/LICENSE">License (MIT)</a>
+        </nav>
+    </div>
+</footer>
+
+</body>
+</html>

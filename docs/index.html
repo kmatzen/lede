@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Lede — your inboxes, ranked</title>
+    <meta name="description" content="A macOS menu-bar app that watches Gmail, GitHub, Slack, Outlook, and Calendar and surfaces the few things that actually matter.">
+    <link rel="icon" type="image/png" href="assets/icon.png">
+    <link rel="apple-touch-icon" href="assets/icon.png">
+    <link rel="stylesheet" href="styles.css">
+    <meta property="og:title" content="Lede — your inboxes, ranked">
+    <meta property="og:description" content="A macOS menu-bar app that watches your inboxes and surfaces the few things that actually matter.">
+    <meta property="og:image" content="assets/icon.png">
+    <meta name="theme-color" content="#0d0d24">
+</head>
+<body>
+
+<header class="hero">
+    <div class="container">
+        <div class="hero-grid">
+            <div class="hero-text">
+                <img class="hero-icon" src="assets/icon.png" alt="Lede icon" width="96" height="96">
+                <h1>Lede</h1>
+                <p class="tagline">Watch your inboxes. Surface what matters.</p>
+                <p class="lede">Lede sits in your menu bar, watches Gmail, GitHub, Slack, Outlook, and your calendar, and uses Claude to pull the few things that actually need your attention to the top — quietly, locally, and on your terms.</p>
+                <div class="cta-row">
+                    <a class="btn btn-primary" href="https://github.com/kmatzen/lede/releases/latest/download/Lede-0.1.1.dmg">
+                        <span class="btn-icon">↓</span>
+                        Download for macOS
+                    </a>
+                    <a class="btn btn-ghost" href="https://github.com/kmatzen/lede">View on GitHub</a>
+                </div>
+                <p class="meta">macOS 14 Sonoma or later · Universal (Apple Silicon + Intel) · Free + open source</p>
+            </div>
+            <div class="hero-visual">
+                <!-- CSS mockup of the panel — swap with a real screenshot any time. -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <span class="panel-bell">🔔</span>
+                        <span class="panel-title">Lede</span>
+                        <span class="panel-spacer"></span>
+                        <span class="panel-button">↻</span>
+                        <span class="panel-button">📌</span>
+                        <span class="panel-button">⚙︎</span>
+                    </div>
+                    <div class="briefing">
+                        <div class="briefing-label">✨ Briefing</div>
+                        <div class="briefing-text">Two PRs need your review by EOD; @sarah just pinged you in #eng about the staging outage. Everything else can wait.</div>
+                    </div>
+                    <div class="tier critical">
+                        <div class="tier-header">▼ Critical 1</div>
+                        <div class="row">
+                            <div class="pill pill-critical">9</div>
+                            <div class="row-body">
+                                <div class="row-meta">Slack · #eng-alerts · 2m ago</div>
+                                <div class="row-summary">@you: staging is throwing 502s, can someone look</div>
+                                <div class="row-reason">direct mention, ongoing incident</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tier high">
+                        <div class="tier-header">▼ High 2</div>
+                        <div class="row">
+                            <div class="pill pill-high">8</div>
+                            <div class="row-body">
+                                <div class="row-meta">GitHub · acme/api · 14m ago</div>
+                                <div class="row-summary">PR review requested: "Migrate auth to passkeys"</div>
+                                <div class="row-reason">review requested by teammate</div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="pill pill-high">7</div>
+                            <div class="row-body">
+                                <div class="row-meta">Gmail · Sarah Chen · 38m ago</div>
+                                <div class="row-summary">"Quick Q before your 2pm — got 5 min?"</div>
+                                <div class="row-reason">requires response today</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="tier medium">
+                        <div class="tier-header">▶ Medium 4</div>
+                    </div>
+                    <div class="tier low">
+                        <div class="tier-header">▶ Low 12</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</header>
+
+<section class="section section-features">
+    <div class="container">
+        <h2>Built around the way you actually triage.</h2>
+        <div class="feature-grid">
+            <div class="feature">
+                <div class="feature-icon">📥</div>
+                <h3>Watches everywhere you get pinged</h3>
+                <p>Gmail, GitHub, Slack, Outlook, Google Calendar, Outlook Calendar. Connect any subset; Lede only watches what you give it access to.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🎯</div>
+                <h3>Sorted by what needs you now</h3>
+                <p>Each item is scored 0–10 by Claude — direct asks and outages float to the top, automated noise sinks. The model never sees full message bodies, only headers and snippets.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🌙</div>
+                <h3>Stays out of your way</h3>
+                <p>Quiet hours auto-mute, snooze on demand, dismissed items don't come back. Background refresh keeps the bell honest without flooding you.</p>
+            </div>
+            <div class="feature">
+                <div class="feature-icon">🔒</div>
+                <h3>Yours alone</h3>
+                <p>No analytics, no telemetry, no servers we run. Tokens live in your Keychain, summaries cache on your Mac, the only network calls are to the providers you connected and the Claude API key you brought.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="section section-sources">
+    <div class="container">
+        <h2>Connects to the inboxes you already have.</h2>
+        <div class="source-grid">
+            <div class="source-card">
+                <div class="source-icon" aria-hidden="true">G</div>
+                <div class="source-name">Gmail</div>
+                <div class="source-detail">Headers + previews only. Restricted scope: <code>gmail.metadata</code>.</div>
+            </div>
+            <div class="source-card">
+                <div class="source-icon" aria-hidden="true">⌘</div>
+                <div class="source-name">GitHub</div>
+                <div class="source-detail">Notifications API. Sign in with code, no token to paste.</div>
+            </div>
+            <div class="source-card">
+                <div class="source-icon" aria-hidden="true">#</div>
+                <div class="source-name">Slack</div>
+                <div class="source-detail">Channel + DM history. One-time app setup, copy-paste manifest.</div>
+            </div>
+            <div class="source-card">
+                <div class="source-icon" aria-hidden="true">M</div>
+                <div class="source-name">Outlook</div>
+                <div class="source-detail">Microsoft Graph. Mail.Read scope only.</div>
+            </div>
+            <div class="source-card">
+                <div class="source-icon" aria-hidden="true">📅</div>
+                <div class="source-name">Calendar</div>
+                <div class="source-detail">Both Google and Outlook calendars. Shows the next 24 hours and unresponded invites.</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="section section-privacy">
+    <div class="container">
+        <h2>Privacy, in one paragraph.</h2>
+        <p class="privacy-summary">
+            Lede reads only what's needed to triage a message — sender, subject, snippet, label, time. It sends those snippets to Anthropic's Claude API to score and summarize them, then caches the result on your Mac. It never reads message bodies, never uploads anything to a server we run, and never collects analytics. Tokens live in your macOS Keychain and you can disconnect any source instantly.
+        </p>
+        <a class="btn btn-ghost" href="privacy.html">Read the full privacy policy →</a>
+    </div>
+</section>
+
+<section class="section section-cta">
+    <div class="container">
+        <h2>Ready when you are.</h2>
+        <div class="cta-row">
+            <a class="btn btn-primary" href="https://github.com/kmatzen/lede/releases/latest/download/Lede-0.1.1.dmg">Download Lede 0.1.1</a>
+            <a class="btn btn-ghost" href="https://github.com/kmatzen/lede/releases">All releases</a>
+        </div>
+        <p class="meta">macOS 14 Sonoma or later. Notarized + signed; opens without warnings.</p>
+    </div>
+</section>
+
+<footer class="footer">
+    <div class="container footer-row">
+        <div class="footer-brand">
+            <img src="assets/icon.png" alt="" width="24" height="24">
+            <span>Lede</span>
+        </div>
+        <nav class="footer-nav">
+            <a href="https://github.com/kmatzen/lede">Source</a>
+            <a href="https://github.com/kmatzen/lede/releases">Releases</a>
+            <a href="privacy.html">Privacy</a>
+            <a href="https://github.com/kmatzen/lede/blob/main/LICENSE">License (MIT)</a>
+        </nav>
+    </div>
+</footer>
+
+</body>
+</html>
