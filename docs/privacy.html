@@ -40,7 +40,7 @@
     <div class="container">
         <a class="doc-back" href="index.html">← Back to Lede</a>
         <h1>Privacy</h1>
-        <p class="updated">Last updated April 24, 2026.</p>
+        <p class="updated">Last updated April 26, 2026.</p>
 
         <p>Lede is a personal triage tool. Our default posture is: as little data as possible, kept on your Mac, never shared with us.</p>
 
@@ -69,11 +69,12 @@
             <li><code>last_digest.json</code> — the most recent digest the panel renders.</li>
             <li><code>dismissed.json</code> — content hashes you clicked Dismiss on.</li>
             <li><code>notified.json</code> — content hashes Lede has already shown a notification for, so banners don't repeat.</li>
-            <li><code>source_state.json</code> — last fetch time, item count, last error per source.</li>
+            <li><code>accounts.json</code> — the registry of connected accounts (provider, account id, display label).</li>
+            <li><code>source_state.json</code> — last fetch time, item count, last error per (account, source).</li>
             <li><code>usage.json</code> — running monthly token usage for cost transparency.</li>
             <li><code>lede.log</code> — recent diagnostics. Truncated to ~1MB.</li>
         </ul>
-        <p>Auth tokens (Anthropic API key, GitHub token, Google refresh token, Slack token, Microsoft refresh token) live in the macOS Keychain under service <code>com.lede.app</code>. Standard macOS access control applies — only Lede can read them.</p>
+        <p>OAuth tokens for each connected account, plus your Anthropic API key, live in the macOS Keychain under service <code>com.lede.app</code> and are namespaced per account. Standard macOS access control applies — only Lede can read them.</p>
 
         <h2>What Lede does not do</h2>
         <ul>

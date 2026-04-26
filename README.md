@@ -16,11 +16,12 @@ The first launch opens a 3-step welcome panel: connect Claude, connect a source,
 
 ## What's in the box
 
-- **Five sources**: GitHub notifications, Gmail (headers + previews via the `gmail.metadata` scope), Slack mentions / DMs / unread channels, Outlook unread mail, and upcoming events from Google and Outlook calendars.
-- **Two-stage triage**: Haiku 4.5 scores every item 0–10; Sonnet 4.6 writes a 2-sentence briefing over the top items. Items you've already seen don't get re-scored.
+- **Five sources**: GitHub notifications, Gmail (headers + snippet via the `gmail.metadata` scope), Slack mentions / DMs / unread channels, Outlook unread mail, and upcoming events from Google + Outlook calendars.
+- **Multi-account**: connect multiple Google, Microsoft, GitHub, or Slack accounts at once. Each account is its own credential, with its own row in Settings.
+- **Two-stage triage**: Haiku scores every item 0–10; Sonnet writes a 2-sentence briefing over the top items. Items you've already seen don't get re-scored.
 - **Priority accordion** with Critical / High / Medium / Low tiers, native notifications for the highest-scoring items, click-to-open, dismiss-to-hide, snooze, and quiet hours.
-- **Cost-aware**: per-model token tally and a "$X used this month" line in About so you know what you're spending. Typical usage runs well under $1/month.
-- **Privacy-first**: tokens in your Keychain, summaries cached on your Mac, no analytics, no servers we run. The full picture is in [PRIVACY.md](PRIVACY.md).
+- **Cost-aware**: per-model token tally and a "$X used this month" line in About. Typical usage runs well under $1/month.
+- **Privacy-first**: tokens in your Keychain, summaries cached on your Mac, no analytics, no servers we run. Details in [PRIVACY.md](PRIVACY.md).
 - **Auto-update** via Sparkle.
 
 ## Build from source
@@ -33,19 +34,13 @@ make run
 
 That builds, signs with a stable identity, bundles into `.build/debug/Lede.app`, and launches it. State lives in `~/Library/Application Support/Lede/`.
 
-For a release build that mirrors the shipping process:
-
-```sh
-make notarize VERSION=0.1.2   # build + sign + Apple notary + staple
-make dmg VERSION=0.1.2        # wrap in a .dmg + notarize that too
-make sparkle-sign VERSION=0.1.2  # sign for Sparkle's appcast
-```
-
 Tests:
 
 ```sh
 swift test
 ```
+
+Releases are cut by pushing a `vX.Y.Z` tag — GitHub Actions does the notarize / DMG / Sparkle-sign / publish dance. See [SHIPPING.md](SHIPPING.md).
 
 ## Configuration
 
@@ -79,7 +74,8 @@ Tests/LedeTests/      — unit tests
 Resources/            — Info.plist, AppIcon.icns, entitlements, Slack manifest
 docs/                 — the website at kmatzen.com/lede
 scripts/              — dev cert + icon generation
-SHIPPING.md           — distribution checklist (notarization, Sparkle, App Store)
+.github/workflows/   — CI (build + test) and Release (tag → notarized DMG)
+SHIPPING.md           — release ops: how to cut a release, required secrets
 PRIVACY.md            — privacy policy (also rendered on the website)
 ```
 
