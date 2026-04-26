@@ -29,11 +29,12 @@ Locally, in `~/Library/Application Support/Lede/`:
 - `last_digest.json` — the most recent digest the panel renders.
 - `dismissed.json` — content hashes you clicked Dismiss on.
 - `notified.json` — content hashes Lede has already shown a notification for, so banners don't repeat.
-- `source_state.json` — last fetch time, item count, last error per source.
+- `accounts.json` — the registry of connected accounts (provider, account id, display label).
+- `source_state.json` — last fetch time, item count, last error per (account, source).
 - `usage.json` — running monthly token usage for cost transparency.
 - `lede.log` — recent diagnostics. Truncated to ~1MB.
 
-Auth tokens (Anthropic API key, GitHub token, Google refresh token, Slack token, Microsoft refresh token) live in the macOS Keychain under service `com.lede.app`. Standard macOS access control applies — only Lede can read them.
+OAuth tokens for each connected account, plus your Anthropic API key, live in the macOS Keychain under service `com.lede.app` and are namespaced per account. Standard macOS access control applies — only Lede can read them.
 
 ## What Lede does not do
 
@@ -51,4 +52,4 @@ Auth tokens (Anthropic API key, GitHub token, Google refresh token, Slack token,
 
 If you find a bug or have a privacy question, open an issue at <https://github.com/kmatzen/lede>.
 
-Last updated: 2026-04-24.
+Last updated: 2026-04-26.
