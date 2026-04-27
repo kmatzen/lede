@@ -204,21 +204,38 @@ struct GmailSource: NotificationSource {
         Log.info("gmail[\(account.label)]: list returned \(ids.count) message id(s)")
 
         let acct = account
-        return try await withThrowingTaskGroup(of: RawItem?.self) { group in
-            for id in ids {
-                group.addTask { try await Self.fetchMetadata(id: id, token: token, account: acct) }
-            }
+        // Gmail returns HTTP 429 "Too many concurrent requests for user." well
+        // before any per-second quota kicks in. Cap in-flight gets at 8.
+        let maxInFlight = 8
+        return await withTaskGroup(of: MetadataResult.self) { group in
             var out: [RawItem] = []
-            var skipped = 0
-            for try await item in group {
-                if let item { out.append(item) } else { skipped += 1 }
+            var filtered = 0
+            var errored = 0
+            var next = 0
+            for id in ids.prefix(maxInFlight) {
+                group.addTask { await Self.fetchMetadata(id: id, token: token, account: acct) }
+                next += 1
             }
-            Log.info("gmail[\(acct.label)]: kept \(out.count) item(s), dropped \(skipped) by client-side filter")
+            while let result = await group.next() {
+                if next < ids.count {
+                    let id = ids[next]
+                    group.addTask { await Self.fetchMetadata(id: id, token: token, account: acct) }
+                    next += 1
+                }
+                switch result {
+                case .kept(let item): out.append(item)
+                case .filtered: filtered += 1
+                case .errored: errored += 1
+                }
+            }
+            Log.info("gmail[\(acct.label)]: kept \(out.count), filtered \(filtered), errored \(errored)")
             return out
         }
     }
 
-    private static func fetchMetadata(id: String, token: String, account: Account) async throws -> RawItem? {
+    private enum MetadataResult { case kept(RawItem), filtered, errored }
+
+    private static func fetchMetadata(id: String, token: String, account: Account) async -> MetadataResult {
         var comps = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages/\(id)")!
         comps.queryItems = [
             .init(name: "format", value: "metadata"),
@@ -228,7 +245,22 @@ struct GmailSource: NotificationSource {
         ]
         var req = URLRequest(url: comps.url!)
         req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, _) = try await URLSession.shared.data(for: req)
+        let data: Data
+        do {
+            let (d, resp) = try await URLSession.shared.data(for: req)
+            // 404 happens when a message is deleted between list and get; 429
+            // when we exceed per-user quota. Drop the offender, don't fail the
+            // whole batch — but log the body so the reason is visible.
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                let body = String(data: d, encoding: .utf8)?.prefix(300) ?? ""
+                Log.warn("gmail[\(account.label)]: get \(id) HTTP \(http.statusCode) — \(body)")
+                return .errored
+            }
+            data = d
+        } catch {
+            Log.warn("gmail[\(account.label)]: get \(id) network error — \(error.localizedDescription)")
+            return .errored
+        }
         struct Msg: Decodable {
             let id: String
             let snippet: String?
@@ -240,12 +272,22 @@ struct GmailSource: NotificationSource {
                 struct Header: Decodable { let name: String; let value: String }
             }
         }
-        let m = try JSONDecoder().decode(Msg.self, from: data)
+        let m: Msg
+        do {
+            m = try JSONDecoder().decode(Msg.self, from: data)
+        } catch {
+            // Name the missing/mistyped field instead of the localized "data
+            // couldn't be read" — that's what made the original failure opaque.
+            let detail = describeDecodingError(error)
+            let body = String(data: data, encoding: .utf8)?.prefix(300) ?? ""
+            Log.warn("gmail[\(account.label)]: get \(id) decode failed — \(detail) — body: \(body)")
+            return .errored
+        }
 
         // Filter out promotional / social / update-bucket mail here, since the
         // metadata scope doesn't let us express this in the list query.
         let skipLabels: Set<String> = ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "SPAM", "TRASH"]
-        if !Set(m.labelIds ?? []).isDisjoint(with: skipLabels) { return nil }
+        if !Set(m.labelIds ?? []).isDisjoint(with: skipLabels) { return .filtered }
 
         let headers = Dictionary(uniqueKeysWithValues: (m.payload?.headers ?? []).map { ($0.name.lowercased(), $0.value) })
         let subject = headers["subject"] ?? "(no subject)"
@@ -255,7 +297,7 @@ struct GmailSource: NotificationSource {
             return Date()
         }()
         let url = URL(string: "https://mail.google.com/mail/u/0/#inbox/\(m.id)")
-        return RawItem(
+        return .kept(RawItem(
             id: m.id,
             source: .gmail,
             accountID: account.id,
@@ -266,7 +308,26 @@ struct GmailSource: NotificationSource {
             url: url,
             receivedAt: received,
             isUnread: (m.labelIds ?? []).contains("UNREAD")
-        )
+        ))
+    }
+
+    private static func describeDecodingError(_ error: Error) -> String {
+        guard let e = error as? DecodingError else { return error.localizedDescription }
+        func path(_ keys: [CodingKey]) -> String {
+            keys.map(\.stringValue).joined(separator: ".")
+        }
+        switch e {
+        case .keyNotFound(let k, let ctx):
+            return "keyNotFound \(k.stringValue) at \(path(ctx.codingPath))"
+        case .valueNotFound(let t, let ctx):
+            return "valueNotFound \(t) at \(path(ctx.codingPath))"
+        case .typeMismatch(let t, let ctx):
+            return "typeMismatch \(t) at \(path(ctx.codingPath))"
+        case .dataCorrupted(let ctx):
+            return "dataCorrupted at \(path(ctx.codingPath)): \(ctx.debugDescription)"
+        @unknown default:
+            return "\(e)"
+        }
     }
 
     /// RFC 2822 From headers are typically `"Display Name" <addr@host>` or just
