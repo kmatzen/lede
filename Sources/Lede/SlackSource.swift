@@ -13,6 +13,13 @@ enum SlackOAuth {
     static let authorizeURL = URL(string: "https://slack.com/oauth/v2/authorize")!
     static let tokenURL = URL(string: "https://slack.com/api/oauth.v2.access")!
     static let userScopes = "channels:history,groups:history,im:history,mpim:history,users:read,channels:read,groups:read,im:read,mpim:read"
+    /// Slack matches `redirect_uri` strictly (scheme+host+port+path), so the
+    /// loopback server must bind a fixed port. Users register exactly
+    /// `http://localhost:\(redirectPort)\(redirectPath)` in their Slack app
+    /// once and never need to update it. The manifest in
+    /// `Resources/slack-app-manifest.yml` keeps these values in sync.
+    static let redirectPort: UInt16 = 53682
+    static let redirectPath = "/oauth/slack"
 
     struct AuthResponse: Decodable {
         let ok: Bool
@@ -32,12 +39,10 @@ enum SlackOAuth {
 
     static func connect(clientID: String, clientSecret: String) async throws -> ConnectResult {
         let server = LoopbackOAuthServer()
-        let port = try await server.start()
+        _ = try await server.start(preferredPort: redirectPort)
         defer { server.stop() }
 
-        // Slack matches redirect_uri on scheme+host+path, ignoring the port.
-        // Register `http://localhost` once; we vary the port.
-        let redirect = "http://localhost:\(port)/oauth/slack"
+        let redirect = "http://localhost:\(redirectPort)\(redirectPath)"
         let state = randomHex(16)
 
         var comps = URLComponents(url: authorizeURL, resolvingAgainstBaseURL: false)!

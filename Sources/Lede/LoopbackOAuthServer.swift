@@ -19,7 +19,12 @@ final class LoopbackOAuthServer {
     private var listenFd: Int32 = -1
 
     /// Bind and listen. Returns the chosen port.
-    func start() async throws -> UInt16 {
+    ///
+    /// Pass a non-zero `preferredPort` for OAuth providers that require an
+    /// exact-match registered redirect URL (Slack). Pass 0 (default) to let
+    /// the OS pick — fine for providers that allow any localhost port for
+    /// installed-app flows (Google, Microsoft consumer).
+    func start(preferredPort: UInt16 = 0) async throws -> UInt16 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno),
@@ -33,7 +38,7 @@ final class LoopbackOAuthServer {
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
-        addr.sin_port = 0  // let the OS pick
+        addr.sin_port = preferredPort.bigEndian
 
         let bindRes = withUnsafePointer(to: &addr) { ptr -> Int32 in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
@@ -43,6 +48,11 @@ final class LoopbackOAuthServer {
         guard bindRes == 0 else {
             let err = errno
             close(fd)
+            if preferredPort != 0 && err == EADDRINUSE {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(err),
+                              userInfo: [NSLocalizedDescriptionKey:
+                                "Port \(preferredPort) is in use. Find what's holding it with `lsof -iTCP:\(preferredPort) -sTCP:LISTEN` and quit it, then retry."])
+            }
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(err),
                           userInfo: [NSLocalizedDescriptionKey: "bind failed (\(String(cString: strerror(err))))"])
         }

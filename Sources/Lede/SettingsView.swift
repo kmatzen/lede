@@ -792,7 +792,7 @@ display_information:
   background_color: "#1d2533"
 oauth_config:
   redirect_urls:
-    - http://localhost
+    - http://localhost:53682/oauth/slack
   scopes:
     user:
       - channels:history
