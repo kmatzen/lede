@@ -80,7 +80,9 @@ final class LoopbackOAuthServer {
 
     /// Accept one connection, read its request line, write a response, return the parsed query.
     /// Polls with `poll()` at 100ms intervals so we can react to:
-    ///   - `Task.isCancelled` (caller cancelled the operation)
+    ///   - caller cancellation (the Cancel button) — propagated via the
+    ///     cancellation handler below, which closes the listen socket so
+    ///     `poll()` returns an error
     ///   - `stop()` being called externally (socket closes → poll returns error)
     ///   - overall timeout
     func waitForCallback(timeoutSeconds: Int = 120) async throws -> CallbackResult {
@@ -90,9 +92,16 @@ final class LoopbackOAuthServer {
                           userInfo: [NSLocalizedDescriptionKey: "server not started"])
         }
         let deadline = Date().addingTimeInterval(Double(timeoutSeconds))
-        return try await Task.detached(priority: .userInitiated) {
-            try Self.acceptAndParse(listenFd: fd, deadline: deadline)
-        }.value
+        // Task.detached doesn't inherit the parent's cancellation, so plumb
+        // it through manually: closing the listen fd makes poll() error and
+        // unwinds the detached task as a CancellationError.
+        return try await withTaskCancellationHandler {
+            try await Task.detached(priority: .userInitiated) {
+                try Self.acceptAndParse(listenFd: fd, deadline: deadline)
+            }.value
+        } onCancel: { [weak self] in
+            self?.stop()
+        }
     }
 
     func stop() {
