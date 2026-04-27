@@ -8,10 +8,11 @@ display_information:
   description: Triage Slack messages via the Lede menu-bar app.
   background_color: "#1d2533"
 oauth_config:
-  # Slack matches scheme+host+path, ignoring the port. Registering the root
-  # http://localhost lets Lede's ephemeral loopback port work on any port.
+  # Slack matches redirect_uri strictly (scheme+host+port+path), so Lede's
+  # loopback server binds the fixed port 53682. Keep this URL exactly in
+  # sync with redirectPort + redirectPath in Sources/Lede/SlackSource.swift.
   redirect_urls:
-    - http://localhost
+    - http://localhost:53682/oauth/slack
   scopes:
     user:
       - channels:history
