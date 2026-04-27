@@ -6,11 +6,15 @@ import CryptoKit
 ///
 /// Client ID embeds the Lede Azure AD app registration. It's a public
 /// identifier — Microsoft's public-client flow uses PKCE, no client secret,
-/// so nothing sensitive leaks. The app is registered as "Personal Microsoft
-/// accounts only" so tenant is hardcoded to `consumers`.
+/// so nothing sensitive leaks. The app is registered as "Any Entra ID tenant
+/// + personal Microsoft accounts" so tenant is `common` — Microsoft routes
+/// each user through whichever provider matches their email. Enterprise
+/// tenants with strict app-consent policies may need an admin to approve
+/// Lede's scopes (Mail.Read, Calendars.Read, User.Read, offline_access)
+/// before the user can complete the flow.
 enum MicrosoftOAuth {
     static let clientID = "d45905df-daf4-4ee0-a2b9-a3f37ba177dd"
-    static let tenant = "consumers"
+    static let tenant = "common"
 
     static let tokenHost = "https://login.microsoftonline.com"
     static let scopes = "offline_access Mail.Read Calendars.Read User.Read"
