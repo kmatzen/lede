@@ -80,5 +80,15 @@
                        type="application/octet-stream"
                        sparkle:edSignature="I+/b4lTOw/Gzi5lzKHOWQyHZ3et9LAkpKbFiRIU56rnqHynek3mjT+1RMhAAhzmN28LLFyvyVwOw7PEYpAABCQ==" length="6374380" />
         </item>
+            <item>
+            <title>Version 0.1.9</title>
+            <pubDate>Tue, 28 Apr 2026 02:22:11 +0000</pubDate>
+            <sparkle:version>0.1.9</sparkle:version>
+            <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kmatzen/lede/releases/download/v0.1.9/Lede-0.1.9.dmg"
+                       type="application/octet-stream"
+                       sparkle:edSignature="RhpZmkC1/kpv4y3TClx9Egf/7gtBjS/IWYjOipgQwqtzt3AU8etjLOc3vyEtPfAfes9GppdyUzQY/0tYNMkmCQ==" length="6374373" />
+        </item>
     </channel>
 </rss>
