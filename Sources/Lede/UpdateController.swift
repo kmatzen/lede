@@ -30,10 +30,15 @@ final class UpdateController: NSObject {
         updater.checkForUpdates(sender)
     }
 
-    /// Crude detection — App Store builds carry a MASReceipt next to the binary.
-    /// Direct-distribution builds don't.
+    /// App Store builds carry an actual MASReceipt file at
+    /// Contents/_MASReceipt/receipt; direct-distribution builds don't.
+    /// `Bundle.main.appStoreReceiptURL` returns that *expected* path on every
+    /// macOS app whether or not the file exists, so checking the path alone
+    /// matches the App Store path for every build — which would leave
+    /// Sparkle's updater unstarted on the DMG and silently break auto-update.
+    /// Stat the file instead.
     private static func isAppStoreBuild() -> Bool {
         guard let receipt = Bundle.main.appStoreReceiptURL else { return false }
-        return receipt.lastPathComponent == "receipt"
+        return FileManager.default.fileExists(atPath: receipt.path)
     }
 }
