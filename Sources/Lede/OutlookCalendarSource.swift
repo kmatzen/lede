@@ -33,6 +33,10 @@ struct OutlookCalendarSource: NotificationSource {
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            if let http = resp as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/calendarview",
+                                                   response: http, body: data, accessToken: token)
+            }
             throw SourceError(source: source,
                 message: "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0) \(String(data: data, encoding: .utf8)?.prefix(300) ?? "")")
         }
