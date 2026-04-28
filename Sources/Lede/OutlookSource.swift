@@ -137,6 +137,47 @@ enum MicrosoftOAuth {
         Keychain.delete(Keychain.Key.microsoftExpiry(accountID))
     }
 
+    /// Diagnostic for Graph 401s: logs the response body, the
+    /// `WWW-Authenticate` header (which says "insufficient_scope" when
+    /// admin consent is the issue), and the relevant JWT claims from the
+    /// access token (scp / aud / tid). Useful for telling apart consent
+    /// gates, audience mismatches, and Conditional Access blocks. Never
+    /// logs the token itself.
+    static func logGraphAuthFailure(endpoint: String,
+                                    response: HTTPURLResponse,
+                                    body: Data,
+                                    accessToken: String) {
+        let bodyStr = String(data: body, encoding: .utf8)?.prefix(800) ?? ""
+        let wwwAuth = response.value(forHTTPHeaderField: "WWW-Authenticate") ?? "<none>"
+        Log.error("Graph \(response.statusCode) on \(endpoint): \(bodyStr)")
+        Log.error("  WWW-Authenticate: \(wwwAuth)")
+        if let claims = jwtClaimsSummary(accessToken) {
+            Log.error("  token claims: \(claims)")
+        } else {
+            Log.error("  token claims: <unparseable>")
+        }
+    }
+
+    /// Decode the JWT payload (middle segment) and return a one-line summary
+    /// of the diagnostic claims. Signature is not verified — local logging only.
+    private static func jwtClaimsSummary(_ token: String) -> String? {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        var payload = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let keys = ["scp", "roles", "aud", "tid", "appid", "iss", "ver"]
+        return keys.compactMap { k -> String? in
+            guard let v = json[k] else { return nil }
+            return "\(k)=\(v)"
+        }.joined(separator: " ")
+    }
+
     // MARK: - helpers
 
     private static func postForm(_ url: URL, form: [String: String]) async throws -> Tokens {
@@ -194,6 +235,10 @@ struct OutlookSource: NotificationSource {
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            if let http = resp as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/mailFolders/Inbox/messages",
+                                                   response: http, body: data, accessToken: token)
+            }
             throw SourceError(source: source,
                               message: "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0) \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")")
         }
