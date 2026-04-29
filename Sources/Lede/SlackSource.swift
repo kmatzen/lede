@@ -209,6 +209,13 @@ struct SlackPrefs {
 /// previously-starred channel as still starred for one refresh) but flagged
 /// for re-fetch when the API budget allows.
 struct SlackStarredCache: Codable {
+    /// Bumped when the cache schema or recording rules change. v0.1.x≤15
+    /// pollutes the cache with IM/MPIM entries (because `fetchInfos`
+    /// recorded every probe regardless of conversation type), which breaks
+    /// the "is this cache empty?" gate that controls auto-discovery.
+    /// v2 keeps only channel entries; older caches get discarded on load.
+    static let currentVersion = 2
+    var version: Int = currentVersion
     var entries: [String: Entry] = [:]
     struct Entry: Codable {
         var isStarred: Bool
@@ -219,7 +226,8 @@ struct SlackStarredCache: Codable {
 
     static func load(teamID: String) -> SlackStarredCache {
         guard let data = UserDefaults.standard.data(forKey: key(teamID)),
-              let cache = try? JSONDecoder().decode(SlackStarredCache.self, from: data)
+              let cache = try? JSONDecoder().decode(SlackStarredCache.self, from: data),
+              cache.version == currentVersion
         else { return SlackStarredCache() }
         return cache
     }
@@ -287,6 +295,11 @@ struct SlackSource: NotificationSource {
         // set when the user has channelMode == .off and no allowlist.
         let convos = try await Self.allConversations(token: token)
         var cache = SlackStarredCache.load(teamID: teamID)
+        // Cache state diagnostic — tells us whether discovery has captured any
+        // starred channels yet, and whether old polluted caches were correctly
+        // cleared by the version bump.
+        let cacheStarred = cache.entries.values.filter { $0.isStarred }.count
+        Log.info("slack[\(account.label)] cache state: \(cache.entries.count) entries, \(cacheStarred) starred")
 
         // Diagnostic: dump full raw conversations.info response body for one
         // IM, one MPIM, one channel so we can see exactly what fields Slack
@@ -531,7 +544,15 @@ struct SlackSource: NotificationSource {
             calls += 1
             if let info = await Self.conversationInfo(channelID: c.id, token: token,
                                                       fallback: c, logFull: logFull) {
-                cache.record(c.id, isStarred: info.isStarred)
+                // Only channels go into the starred cache. Recording IMs/MPIMs
+                // here was the v0.1.10–15 cache pollution bug: a non-empty
+                // cache full of non-channel entries silenced the auto-discovery
+                // gate, so channels never got their is_starred captured and
+                // starred-channel unreads never surfaced.
+                let isChannel = (c.is_im != true && c.is_mpim != true)
+                if isChannel {
+                    cache.record(c.id, isStarred: info.isStarred)
+                }
                 out.append(info)
             }
         }
