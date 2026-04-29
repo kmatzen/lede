@@ -256,13 +256,16 @@ struct SlackSource: NotificationSource {
     }
 
     /// Hard cap on `conversations.info` calls per refresh. Slack rates that
-    /// method at Tier 3 (~50/min); we throttle to ~40/min and cap absolute
+    /// method at Tier 3 (~50/min); we throttle to ~50/min and cap absolute
     /// volume so a workspace with thousands of channels can't stall us forever.
-    private static let infoCallBudget = 80
+    /// 200 is comfortably more than the bounded candidate set should ever be
+    /// in default config (DMs+MPIMs+cached starred); only `channelMode == .all`
+    /// in a giant workspace approaches it.
+    private static let infoCallBudget = 200
 
-    /// Sleep between successive `conversations.info` calls. ~40/min → leaves
-    /// headroom under the 50/min Tier 3 limit and keeps the budget tractable.
-    private static let infoCallSpacing: TimeInterval = 1.5
+    /// Sleep between successive `conversations.info` calls. ~50/min → at the
+    /// Tier 3 limit but Slack honors Retry-After if we trip 429.
+    private static let infoCallSpacing: TimeInterval = 1.2
 
     func fetch() async throws -> [RawItem] {
         guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return [] }
@@ -322,6 +325,13 @@ struct SlackSource: NotificationSource {
         let is_private: Bool?
         let is_member: Bool?
         let user: String?           // DM partner user id
+        /// True when the user has this DM/MPIM open in their sidebar. Slack
+        /// returns every IM the user has ever participated in from
+        /// `users.conversations`, including ones closed years ago — `is_open`
+        /// is the only signal that distinguishes a live DM from a dead one.
+        /// Always true for channels you're a member of, so we only consult it
+        /// for IMs/MPIMs.
+        let is_open: Bool?
     }
 
     /// Paginate through every conversation the user is a member of (or sees,
@@ -384,17 +394,21 @@ struct SlackSource: NotificationSource {
             if !name.isEmpty && deny.contains(name) { return false }
             if !name.isEmpty && allow.contains(name) { return true }
 
-            if c.is_im == true { return prefs.includeDMs }
-            if c.is_mpim == true { return prefs.includeMPIMs }
+            // IMs/MPIMs: only count ones the user has open in their sidebar.
+            // Slack will happily return every IM you've ever sent including
+            // years-old closed ones; without this filter a workspace can have
+            // thousands of dead DMs that swamp the conversations.info budget.
+            if c.is_im == true { return prefs.includeDMs && c.is_open == true }
+            if c.is_mpim == true { return prefs.includeMPIMs && c.is_open == true }
 
             // Public / private channel from here down.
             guard c.is_member == true else { return false }
             if mode != .off { return true }
+            // Starred channels: only ones the cache *already knows* are starred.
+            // First-run discovery is a separate, explicit one-shot via
+            // `discoverStarred(account:)` — we never bulk-probe unknown channels
+            // during a regular refresh.
             if prefs.includeStarred && cache.isStarred(c.id) == true { return true }
-            // Even with mode == .off and not-currently-cached, give the channel
-            // one shot at conversations.info if its starred state is unknown so
-            // the cache fills in on first run. The budget below caps total cost.
-            if prefs.includeStarred && cache.entries[c.id] == nil { return true }
             return false
         }
     }
@@ -450,8 +464,14 @@ struct SlackSource: NotificationSource {
             if calls > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(infoCallSpacing * 1_000_000_000))
             }
+            // Log the first response per refresh in detail so we can verify
+            // Slack's actual return shape against our assumptions (is_starred,
+            // unread_count, unread_count_display, last_read populated as docs
+            // claim). After the first call, we trust the parser.
+            let logFull = (calls == 0)
             calls += 1
-            if let info = await Self.conversationInfo(channelID: c.id, token: token, fallback: c) {
+            if let info = await Self.conversationInfo(channelID: c.id, token: token,
+                                                      fallback: c, logFull: logFull) {
                 cache.record(c.id, isStarred: info.isStarred)
                 out.append(info)
             }
@@ -460,10 +480,13 @@ struct SlackSource: NotificationSource {
     }
 
     /// Single `conversations.info` round-trip. Returns nil on transient errors
-    /// so one bad channel doesn't take down the whole refresh.
+    /// so one bad channel doesn't take down the whole refresh. `logFull=true`
+    /// emits a one-time-per-refresh diagnostic at INFO level so we can verify
+    /// Slack's actual response shape in the field.
     private static func conversationInfo(channelID: String,
                                          token: String,
-                                         fallback: Conversation) async -> ConversationInfo? {
+                                         fallback: Conversation,
+                                         logFull: Bool = false) async -> ConversationInfo? {
         var comps = URLComponents(string: "https://slack.com/api/conversations.info")!
         comps.queryItems = [
             .init(name: "channel", value: channelID),
@@ -492,7 +515,16 @@ struct SlackSource: NotificationSource {
             }
         }
         guard let parsed = try? JSONDecoder().decode(Resp.self, from: data),
-              parsed.ok, let ch = parsed.channel else { return nil }
+              parsed.ok, let ch = parsed.channel else {
+            if logFull {
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                Log.warn("slack: conversations.info first-call returned non-OK or unparseable: \(raw.prefix(400))")
+            }
+            return nil
+        }
+        if logFull {
+            Log.info("slack: conversations.info sample channel=\(ch.id) name=\(ch.name ?? "(none)") is_starred=\(String(describing: ch.is_starred)) unread_count=\(String(describing: ch.unread_count)) unread_count_display=\(String(describing: ch.unread_count_display)) last_read=\(ch.last_read ?? "(none)")")
+        }
         return ConversationInfo(
             id: ch.id,
             name: ch.name ?? fallback.name,
@@ -504,6 +536,55 @@ struct SlackSource: NotificationSource {
             unreadCountDisplay: ch.unread_count_display ?? 0,
             lastReadTS: ch.last_read
         )
+    }
+
+    // MARK: - Starred discovery (one-shot, opt-in)
+
+    /// Walk every member channel that isn't already in the starred cache and
+    /// run `conversations.info` to learn its `is_starred` flag. The cache is
+    /// then consulted on every subsequent refresh — so this only needs to run
+    /// once after connecting a workspace, plus occasionally when the user
+    /// stars new channels. Rate-limited to ~50/min and saves the cache every
+    /// 25 channels so a mid-walk crash doesn't lose progress.
+    static func discoverStarred(account: Account,
+                                onProgress: @escaping @Sendable (Int, Int) -> Void) async {
+        guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return }
+        let teamID = account.id
+        var cache = SlackStarredCache.load(teamID: teamID)
+
+        let convos: [Conversation]
+        do { convos = try await allConversations(token: token) }
+        catch {
+            Log.error("slack discover: users.conversations failed — \(error.localizedDescription)")
+            return
+        }
+
+        let toProbe = convos.filter { c in
+            // Member channels (not IMs/MPIMs) we haven't probed before.
+            let isChannel = (c.is_im != true && c.is_mpim != true)
+            return isChannel && c.is_member == true && cache.entries[c.id] == nil
+        }
+        let total = toProbe.count
+        Log.info("slack discover[\(account.label)]: \(total) channel(s) to probe")
+        onProgress(0, total)
+
+        var done = 0
+        var foundStarred = 0
+        for c in toProbe {
+            if done > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(infoCallSpacing * 1_000_000_000))
+            }
+            if let info = await conversationInfo(channelID: c.id, token: token, fallback: c) {
+                cache.record(c.id, isStarred: info.isStarred)
+                if info.isStarred { foundStarred += 1 }
+            }
+            done += 1
+            onProgress(done, total)
+            if done % 25 == 0 { cache.save(teamID: teamID) }
+            if Task.isCancelled { break }
+        }
+        cache.save(teamID: teamID)
+        Log.info("slack discover[\(account.label)]: probed \(done)/\(total), \(foundStarred) starred")
     }
 
     // MARK: - Final filter

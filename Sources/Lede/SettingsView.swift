@@ -545,6 +545,11 @@ private struct SlackAccountRow: View {
     @AppStorage private var allowlist: String
     @AppStorage private var denylist: String
 
+    @State private var discovering = false
+    @State private var discoveryDone: Int = 0
+    @State private var discoveryTotal: Int = 0
+    @State private var discoveryTask: Task<Void, Never>? = nil
+
     init(engine: CoreEngine, account: Account) {
         self.engine = engine
         self.account = account
@@ -566,6 +571,9 @@ private struct SlackAccountRow: View {
                     Toggle("Direct messages", isOn: $includeDMs)
                     Toggle("Group DMs", isOn: $includeMPIMs)
                     Toggle("Starred channels", isOn: $includeStarred)
+                    if includeStarred {
+                        starredDiscoveryRow
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Channels you're a member of").font(.caption)
@@ -596,6 +604,47 @@ private struct SlackAccountRow: View {
             }
             .font(.caption)
         }
+    }
+
+    /// "Find starred channels" button + progress. Discovery only needs to
+    /// run once per workspace (and again if the user stars new channels);
+    /// the regular refresh cycle never bulk-probes unknown channels.
+    @ViewBuilder
+    private var starredDiscoveryRow: some View {
+        HStack(spacing: 8) {
+            if discovering {
+                Button("Cancel") { discoveryTask?.cancel() }
+                    .controlSize(.small)
+                ProgressView().controlSize(.small)
+                Text("Checking \(discoveryDone) of \(discoveryTotal)…")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else {
+                Button("Find starred channels") {
+                    discoveryDone = 0
+                    discoveryTotal = 0
+                    discovering = true
+                    discoveryTask = Task {
+                        await SlackSource.discoverStarred(account: account) { done, total in
+                            Task { @MainActor in
+                                discoveryDone = done
+                                discoveryTotal = total
+                            }
+                        }
+                        await MainActor.run {
+                            discovering = false
+                            discoveryTask = nil
+                        }
+                    }
+                }
+                .controlSize(.small)
+                if discoveryTotal > 0 {
+                    Text("Last run: \(discoveryDone) channel\(discoveryDone == 1 ? "" : "s") checked")
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.leading, 18)
     }
 }
 
