@@ -274,23 +274,54 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["C1"])
     }
 
-    func testSlackCandidatesSkipsClosedIMs() {
-        // Slack returns every IM you've ever DM'd in users.conversations,
-        // even ones you closed years ago. Without the is_open filter those
-        // dead DMs swamp the conversations.info budget on first refresh.
+    func testSlackCandidatesIncludesIMsRegardlessOfIsOpen() {
+        // Earlier code required `is_open == true` to drop dormant DMs, but
+        // `users.conversations` doesn't actually return that field — so the
+        // filter dropped every IM and produced 0 candidates. The fix removes
+        // the is_open requirement; bounding now happens via imCandidateCap.
         let team = "TEST_TEAM_\(UUID().uuidString)"
         defer { clearSlackPrefs(team: team) }
         let prefs = SlackPrefs(teamID: team)
 
         let openIM = makeIM(id: "D_open", isOpen: true)
         let closedIM = makeIM(id: "D_closed", isOpen: false)
-        let openMPIM = makeMPIM(id: "G_open", isOpen: true)
-        let closedMPIM = makeMPIM(id: "G_closed", isOpen: false)
+        let nilIM = SlackSource.Conversation(
+            id: "D_nil", name: nil, is_im: true, is_mpim: false,
+            is_channel: false, is_private: false,
+            is_member: nil, user: "U", is_open: nil
+        )
         let result = SlackSource.candidates(
-            from: [openIM, closedIM, openMPIM, closedMPIM],
+            from: [openIM, closedIM, nilIM],
             prefs: prefs, cache: SlackStarredCache()
         )
-        XCTAssertEqual(Set(result.map(\.id)), ["D_open", "G_open"])
+        XCTAssertEqual(Set(result.map(\.id)), ["D_open", "D_closed", "D_nil"])
+    }
+
+    func testSlackCandidatesCapsIMs() {
+        // Even with includeDMs on, we cap IMs in the candidate set so a
+        // 1000-IM workspace can't swamp the conversations.info budget.
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+
+        let cap = SlackSource.imCandidateCap
+        let many = (0..<(cap + 50)).map { makeIM(id: "D\($0)") }
+        let mpim = makeMPIM(id: "G1")        // non-IM, must survive
+        let channel = makeChannel(id: "C1", name: "watch", isMember: true)
+        prefs.allowlistRaw = "#watch"        // allowlisted channel must survive
+
+        let result = SlackSource.candidates(
+            from: many + [mpim, channel],
+            prefs: prefs, cache: SlackStarredCache()
+        )
+        let imIDs = result.filter { $0.is_im == true }.map { $0.id }
+        XCTAssertEqual(imIDs.count, cap, "IMs must be capped at imCandidateCap")
+        // Cap takes the *first* N (Slack's order), so D0..D{cap-1} survive.
+        XCTAssertEqual(imIDs.first, "D0")
+        XCTAssertEqual(imIDs.last, "D\(cap - 1)")
+        // Non-IMs aren't capped.
+        XCTAssertTrue(result.contains { $0.id == "G1" })
+        XCTAssertTrue(result.contains { $0.id == "C1" })
     }
 
     func testSlackCandidatesNeverProbesUnknownStarredChannel() {
