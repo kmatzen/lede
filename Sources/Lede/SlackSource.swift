@@ -110,8 +110,9 @@ enum SlackOAuth {
         Keychain.delete(Keychain.Key.slackClientSecret(accountID))
         Keychain.delete(Keychain.Key.slackUserID(accountID))
         SlackStarredCache.clear(teamID: accountID)
-        // Reset the auto-discovery flag so reconnecting the workspace
-        // re-runs the one-time starred walk.
+        // Pre-v0.1.14 wrote a persistent autoDiscoveryInitiated flag we no
+        // longer read. Clean it up on signOut so an old workspace that had
+        // it set doesn't carry stale UserDefaults if the user reconnects.
         UserDefaults.standard.removeObject(forKey: "lede.slack.\(accountID).autoDiscoveryInitiated")
     }
 
@@ -576,26 +577,36 @@ struct SlackSource: NotificationSource {
 
     // MARK: - Starred discovery
 
-    /// Persistent flag: have we ever fired auto-discovery for this workspace?
-    /// Prevents repeatedly walking 1000-channel workspaces just because the
-    /// cache happens to be empty for some other reason (e.g. user wiped it).
-    private static func autoDiscoveredKey(_ teamID: String) -> String {
-        "lede.slack.\(teamID).autoDiscoveryInitiated"
+    /// Process-wide mutex over starred discovery. Prevents concurrent walks
+    /// of the same workspace — auto-discovery firing while the user has the
+    /// "Find starred channels" button mid-run, or back-to-back refreshes
+    /// before the first batch saves to cache.
+    actor DiscoveryGuard {
+        static let shared = DiscoveryGuard()
+        private var active: Set<String> = []
+
+        func acquire(_ teamID: String) -> Bool {
+            if active.contains(teamID) { return false }
+            active.insert(teamID)
+            return true
+        }
+        func release(_ teamID: String) {
+            active.remove(teamID)
+        }
     }
 
-    /// Conditions a fire-and-forget `discoverStarred` call against:
-    ///   - includeStarred is on (user actually wants starred channels surfaced)
-    ///   - the cache is empty (we have no idea which channels are starred)
-    ///   - we haven't already kicked off auto-discovery for this workspace
-    /// All three must hold. Sets the persistent flag immediately so a fast
-    /// second refresh doesn't double-fire while the first is still running.
+    /// Fire-and-forget `discoverStarred` when the cache is empty + the user
+    /// has includeStarred on. Earlier versions also gated on a persistent
+    /// "have we ever auto-fired for this workspace?" UserDefaults flag, but
+    /// that interacted poorly with bug-fix releases — a buggy v0.1.12 set the
+    /// flag and v0.1.13's correct code couldn't re-fire. The DiscoveryGuard
+    /// already covers concurrent fires within a session, and the cache fills
+    /// incrementally (saved every 25 channels) so it flips off the gate
+    /// shortly after discovery actually starts.
     static func maybeAutoDiscoverStarred(account: Account,
                                          prefs: SlackPrefs,
                                          cache: SlackStarredCache) {
         guard prefs.includeStarred, cache.entries.isEmpty else { return }
-        let flag = autoDiscoveredKey(account.id)
-        guard !UserDefaults.standard.bool(forKey: flag) else { return }
-        UserDefaults.standard.set(true, forKey: flag)
         let acct = account
         Log.info("slack[\(acct.label)]: auto-discovering starred channels in background")
         Task.detached {
@@ -613,6 +624,14 @@ struct SlackSource: NotificationSource {
     /// 25 channels so a mid-walk crash doesn't lose progress.
     static func discoverStarred(account: Account,
                                 onProgress: @escaping @Sendable (Int, Int) -> Void) async {
+        // Mutex against duplicate concurrent walks (auto + manual button,
+        // overlapping refreshes during the first 30s before the first
+        // 25-channel save flips cache.entries.isEmpty off, etc.).
+        guard await DiscoveryGuard.shared.acquire(account.id) else {
+            Log.info("slack discover[\(account.label)]: already running, skipping")
+            return
+        }
+        defer { Task.detached { await DiscoveryGuard.shared.release(account.id) } }
         guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return }
         let teamID = account.id
         var cache = SlackStarredCache.load(teamID: teamID)
