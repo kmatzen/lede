@@ -455,7 +455,7 @@ private struct SlackAccountsPane: View {
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 ForEach(connectedAccounts) { account in
-                    AccountRow(engine: engine, account: account)
+                    SlackAccountRow(engine: engine, account: account)
                 }
                 SourcePauseToggle(source: .slack)
             }
@@ -526,6 +526,75 @@ private struct SlackAccountsPane: View {
             status = "Cancelled."
         } catch {
             status = error.localizedDescription
+        }
+    }
+}
+
+/// Slack-specific account row: the standard AccountRow plus a per-workspace
+/// disclosure with knobs for what to include. Lives here (not in
+/// `SlackAccountsPane`) so it can be reused if Slack ever grows another entry
+/// point in Settings, and so the row keeps its own `@AppStorage` lifetimes.
+private struct SlackAccountRow: View {
+    @ObservedObject var engine: CoreEngine
+    let account: Account
+
+    @AppStorage private var includeDMs: Bool
+    @AppStorage private var includeMPIMs: Bool
+    @AppStorage private var includeStarred: Bool
+    @AppStorage private var channelMode: String
+    @AppStorage private var allowlist: String
+    @AppStorage private var denylist: String
+
+    init(engine: CoreEngine, account: Account) {
+        self.engine = engine
+        self.account = account
+        let prefix = "lede.slack.\(account.id)"
+        self._includeDMs    = AppStorage(wrappedValue: true,  "\(prefix).includeDMs")
+        self._includeMPIMs  = AppStorage(wrappedValue: true,  "\(prefix).includeMPIMs")
+        self._includeStarred = AppStorage(wrappedValue: true, "\(prefix).includeStarred")
+        self._channelMode   = AppStorage(wrappedValue: SlackPrefs.ChannelMode.off.rawValue,
+                                         "\(prefix).channelMode")
+        self._allowlist     = AppStorage(wrappedValue: "",    "\(prefix).allowlist")
+        self._denylist      = AppStorage(wrappedValue: "",    "\(prefix).denylist")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            AccountRow(engine: engine, account: account)
+            DisclosureGroup("What to include from this workspace") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Direct messages", isOn: $includeDMs)
+                    Toggle("Group DMs", isOn: $includeMPIMs)
+                    Toggle("Starred channels", isOn: $includeStarred)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Channels you're a member of").font(.caption)
+                        Picker("", selection: $channelMode) {
+                            Text("Don't include").tag(SlackPrefs.ChannelMode.off.rawValue)
+                            Text("Only mentions / threads").tag(SlackPrefs.ChannelMode.mentions.rawValue)
+                            Text("Every unread message").tag(SlackPrefs.ChannelMode.all.rawValue)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        Text("Including every unread message can be noisy in workspaces with hundreds of channels.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Always include these channels").font(.caption)
+                        TextField("#general, #incidents", text: $allowlist)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Never include these channels").font(.caption)
+                        TextField("#bot-spam, #random", text: $denylist)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding(.top, 6)
+            }
+            .font(.caption)
         }
     }
 }

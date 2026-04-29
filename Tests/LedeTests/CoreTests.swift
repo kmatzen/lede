@@ -159,4 +159,269 @@ final class CoreTests: XCTestCase {
     func testParseRetryAfterAbsent() {
         XCTAssertNil(AnthropicClient.parseRetryAfter(body: "no rate limit info here"))
     }
+
+    // MARK: Slack — prefs parsing
+
+    func testSlackPrefsParseListNormalizesEntries() {
+        // Strips leading #, lowercases, trims whitespace, drops empties.
+        let parsed = SlackPrefs.parseList(" #General, #INCIDENTS,, oncall ,#bots ")
+        XCTAssertEqual(parsed, ["general", "incidents", "oncall", "bots"])
+    }
+
+    func testSlackPrefsParseListEmpty() {
+        XCTAssertEqual(SlackPrefs.parseList(""), [])
+        XCTAssertEqual(SlackPrefs.parseList("   ,  , ,"), [])
+    }
+
+    // MARK: Slack — prefs UserDefaults round-trip
+
+    func testSlackPrefsDefaultsAndOverrides() {
+        // Use a synthetic teamID so we don't stomp real prefs from the running
+        // app, and clean up after ourselves.
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+
+        let prefs = SlackPrefs(teamID: team)
+        // Defaults: DMs/MPIMs/starred on, member channels off.
+        XCTAssertTrue(prefs.includeDMs)
+        XCTAssertTrue(prefs.includeMPIMs)
+        XCTAssertTrue(prefs.includeStarred)
+        XCTAssertEqual(prefs.channelMode, .off)
+        XCTAssertEqual(prefs.allowlistRaw, "")
+
+        // Overrides persist via UserDefaults and survive re-construction.
+        prefs.includeDMs = false
+        prefs.channelMode = .mentions
+        prefs.allowlistRaw = "#a, #b"
+        let again = SlackPrefs(teamID: team)
+        XCTAssertFalse(again.includeDMs)
+        XCTAssertEqual(again.channelMode, .mentions)
+        XCTAssertEqual(again.allowlist, ["a", "b"])
+    }
+
+    // MARK: Slack — candidate pre-filter
+
+    func testSlackCandidatesDenylistBeatsEverything() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.allowlistRaw = "#noisy"   // even an explicit allow doesn't override deny
+        prefs.denylistRaw = "#noisy"
+
+        let convo = makeChannel(id: "C1", name: "noisy", isMember: true)
+        let result = SlackSource.candidates(from: [convo], prefs: prefs,
+                                            cache: SlackStarredCache())
+        XCTAssertTrue(result.isEmpty, "denylist should win over allowlist")
+    }
+
+    func testSlackCandidatesAllowlistForcesInclusion() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.allowlistRaw = "#alerts"
+        // Channel mode off + not starred in cache → would normally be excluded,
+        // but allowlist forces it through.
+        let convo = makeChannel(id: "C1", name: "alerts", isMember: true)
+        let result = SlackSource.candidates(from: [convo], prefs: prefs,
+                                            cache: SlackStarredCache())
+        XCTAssertEqual(result.map(\.id), ["C1"])
+    }
+
+    func testSlackCandidatesRespectsTypeToggles() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.includeDMs = false
+        prefs.includeMPIMs = true
+
+        let dm = makeIM(id: "D1")
+        let groupDM = makeMPIM(id: "G1")
+        let result = SlackSource.candidates(from: [dm, groupDM], prefs: prefs,
+                                            cache: SlackStarredCache())
+        XCTAssertEqual(result.map(\.id), ["G1"])
+    }
+
+    func testSlackCandidatesMemberChannelGatedByMode() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.includeStarred = false  // starred-cache fallback off
+        prefs.channelMode = .off
+
+        let convo = makeChannel(id: "C1", name: "general", isMember: true)
+        let off = SlackSource.candidates(from: [convo], prefs: prefs,
+                                         cache: SlackStarredCache())
+        XCTAssertTrue(off.isEmpty)
+
+        prefs.channelMode = .mentions
+        let on = SlackSource.candidates(from: [convo], prefs: prefs,
+                                        cache: SlackStarredCache())
+        XCTAssertEqual(on.map(\.id), ["C1"])
+    }
+
+    func testSlackCandidatesIncludesCachedStarredEvenWhenModeOff() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .off
+        prefs.includeStarred = true
+
+        var cache = SlackStarredCache()
+        cache.record("C1", isStarred: true)
+
+        let convo = makeChannel(id: "C1", name: "general", isMember: true)
+        let result = SlackSource.candidates(from: [convo], prefs: prefs, cache: cache)
+        XCTAssertEqual(result.map(\.id), ["C1"])
+    }
+
+    func testSlackCandidatesSkipsNonMemberChannels() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .all
+
+        // A public channel the user isn't in shouldn't be probed.
+        let convo = makeChannel(id: "C1", name: "random", isMember: false)
+        let result = SlackSource.candidates(from: [convo], prefs: prefs,
+                                            cache: SlackStarredCache())
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    // MARK: Slack — shouldSurface (final filter)
+
+    func testSlackShouldSurfaceDMUnread() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+
+        let withUnread = makeIMInfo(unread: 2)
+        let read = makeIMInfo(unread: 0)
+        XCTAssertTrue(SlackSource.shouldSurface(withUnread, prefs: prefs))
+        XCTAssertFalse(SlackSource.shouldSurface(read, prefs: prefs))
+    }
+
+    func testSlackShouldSurfaceDMRespectsToggle() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.includeDMs = false
+
+        let withUnread = makeIMInfo(unread: 2)
+        XCTAssertFalse(SlackSource.shouldSurface(withUnread, prefs: prefs))
+    }
+
+    func testSlackShouldSurfaceMemberChannelMentionsMode() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .mentions
+        prefs.includeStarred = false
+
+        // Five unread, none of which are mentions/threads.
+        let chatter = makeChannelInfo(name: "general", unread: 5, mentions: 0)
+        XCTAssertFalse(SlackSource.shouldSurface(chatter, prefs: prefs))
+
+        // One mention badge → surface.
+        let mentioned = makeChannelInfo(name: "general", unread: 5, mentions: 1)
+        XCTAssertTrue(SlackSource.shouldSurface(mentioned, prefs: prefs))
+    }
+
+    func testSlackShouldSurfaceMemberChannelAllMode() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .all
+        prefs.includeStarred = false
+
+        // Any unread message qualifies in `all` mode, even without mentions.
+        let info = makeChannelInfo(name: "general", unread: 1, mentions: 0)
+        XCTAssertTrue(SlackSource.shouldSurface(info, prefs: prefs))
+    }
+
+    func testSlackShouldSurfaceStarredOverridesMode() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .off  // explicitly off
+        prefs.includeStarred = true
+
+        // Starred channel with one unread → surface despite mode == off.
+        let starred = makeChannelInfo(name: "general", unread: 1, mentions: 0,
+                                      isStarred: true)
+        XCTAssertTrue(SlackSource.shouldSurface(starred, prefs: prefs))
+
+        // Same channel without unreads → don't surface (we never push read msgs).
+        let starredRead = makeChannelInfo(name: "general", unread: 0, mentions: 0,
+                                          isStarred: true)
+        XCTAssertFalse(SlackSource.shouldSurface(starredRead, prefs: prefs))
+    }
+
+    func testSlackShouldSurfaceDenylistAlwaysWins() {
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .all
+        prefs.includeStarred = true
+        prefs.denylistRaw = "#general"
+
+        // Even a starred + unread + allow-mode channel gets dropped if denied.
+        let info = makeChannelInfo(name: "general", unread: 5, mentions: 5,
+                                   isStarred: true)
+        XCTAssertFalse(SlackSource.shouldSurface(info, prefs: prefs))
+    }
+
+    // MARK: - Slack test helpers
+
+    private func makeChannel(id: String, name: String, isMember: Bool) -> SlackSource.Conversation {
+        SlackSource.Conversation(
+            id: id, name: name,
+            is_im: false, is_mpim: false,
+            is_channel: true, is_private: false,
+            is_member: isMember, user: nil
+        )
+    }
+
+    private func makeIM(id: String) -> SlackSource.Conversation {
+        SlackSource.Conversation(
+            id: id, name: nil,
+            is_im: true, is_mpim: false,
+            is_channel: false, is_private: false,
+            is_member: nil, user: "U_partner"
+        )
+    }
+
+    private func makeMPIM(id: String) -> SlackSource.Conversation {
+        SlackSource.Conversation(
+            id: id, name: nil,
+            is_im: false, is_mpim: true,
+            is_channel: false, is_private: false,
+            is_member: nil, user: nil
+        )
+    }
+
+    private func makeIMInfo(unread: Int) -> SlackSource.ConversationInfo {
+        SlackSource.ConversationInfo(
+            id: "D1", name: nil, isIM: true, isMPIM: false,
+            dmUser: "U_partner", isStarred: false,
+            unreadCount: unread, unreadCountDisplay: unread, lastReadTS: nil
+        )
+    }
+
+    private func makeChannelInfo(name: String, unread: Int, mentions: Int,
+                                 isStarred: Bool = false) -> SlackSource.ConversationInfo {
+        SlackSource.ConversationInfo(
+            id: "C1", name: name, isIM: false, isMPIM: false,
+            dmUser: nil, isStarred: isStarred,
+            unreadCount: unread, unreadCountDisplay: mentions, lastReadTS: nil
+        )
+    }
+
+    /// Wipe the UserDefaults keys our SlackPrefs writes for a synthetic teamID.
+    private func clearSlackPrefs(team: String) {
+        let d = UserDefaults.standard
+        for k in ["includeDMs", "includeMPIMs", "includeStarred",
+                  "channelMode", "allowlist", "denylist", "starredCache"] {
+            d.removeObject(forKey: "lede.slack.\(team).\(k)")
+        }
+    }
 }

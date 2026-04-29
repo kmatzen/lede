@@ -109,6 +109,7 @@ enum SlackOAuth {
         Keychain.delete(Keychain.Key.slackClientID(accountID))
         Keychain.delete(Keychain.Key.slackClientSecret(accountID))
         Keychain.delete(Keychain.Key.slackUserID(accountID))
+        SlackStarredCache.clear(teamID: accountID)
     }
 
     private static func randomHex(_ bytes: Int) -> String {
@@ -118,6 +119,134 @@ enum SlackOAuth {
     }
 }
 
+// MARK: - Per-workspace prefs
+
+/// User-controllable knobs for what to surface from a Slack workspace.
+///
+/// The defaults aim at "high-signal, low API cost": DMs, group DMs, and
+/// channels the user has explicitly starred. Member channels are off by
+/// default because including them requires a `conversations.info` call per
+/// channel, which is expensive on workspaces with hundreds of channels.
+struct SlackPrefs {
+    let teamID: String
+
+    /// What to do with public/private channels the user is a member of.
+    enum ChannelMode: String {
+        /// Don't include member channels at all (still respects allowlist + starred).
+        case off
+        /// Only include unread mentions / thread replies (uses `unread_count_display`).
+        case mentions
+        /// Include any unread message (uses `unread_count`).
+        case all
+    }
+
+    var includeDMs: Bool {
+        get { boolDefault("includeDMs", default: true) }
+        nonmutating set { setBool("includeDMs", newValue) }
+    }
+    var includeMPIMs: Bool {
+        get { boolDefault("includeMPIMs", default: true) }
+        nonmutating set { setBool("includeMPIMs", newValue) }
+    }
+    /// Always check channels marked starred in the user's sidebar, regardless
+    /// of the channel mode below.
+    var includeStarred: Bool {
+        get { boolDefault("includeStarred", default: true) }
+        nonmutating set { setBool("includeStarred", newValue) }
+    }
+    var channelMode: ChannelMode {
+        get {
+            let raw = UserDefaults.standard.string(forKey: key("channelMode")) ?? ""
+            return ChannelMode(rawValue: raw) ?? .off
+        }
+        nonmutating set { UserDefaults.standard.set(newValue.rawValue, forKey: key("channelMode")) }
+    }
+
+    /// Comma-separated list, raw form so the UI can bind to it verbatim.
+    /// Parsed into `allowlist` / `denylist` (lowercased, stripped of leading `#`).
+    var allowlistRaw: String {
+        get { UserDefaults.standard.string(forKey: key("allowlist")) ?? "" }
+        nonmutating set { UserDefaults.standard.set(newValue, forKey: key("allowlist")) }
+    }
+    var denylistRaw: String {
+        get { UserDefaults.standard.string(forKey: key("denylist")) ?? "" }
+        nonmutating set { UserDefaults.standard.set(newValue, forKey: key("denylist")) }
+    }
+    var allowlist: Set<String> { Self.parseList(allowlistRaw) }
+    var denylist: Set<String> { Self.parseList(denylistRaw) }
+
+    private func key(_ name: String) -> String { "lede.slack.\(teamID).\(name)" }
+    private func boolDefault(_ name: String, default fallback: Bool) -> Bool {
+        let k = key(name)
+        if UserDefaults.standard.object(forKey: k) == nil { return fallback }
+        return UserDefaults.standard.bool(forKey: k)
+    }
+    private func setBool(_ name: String, _ value: Bool) {
+        UserDefaults.standard.set(value, forKey: key(name))
+    }
+    /// Internal so tests can pin the parsing rules (strip `#`, lowercase,
+    /// trim whitespace, split on commas, drop empties) without going through
+    /// UserDefaults round-trips.
+    static func parseList(_ raw: String) -> Set<String> {
+        Set(raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .map { $0.hasPrefix("#") ? String($0.dropFirst()) : $0 }
+            .filter { !$0.isEmpty })
+    }
+}
+
+// MARK: - is_starred cache
+
+/// Per-workspace cache of `is_starred` flags. Star membership rarely changes,
+/// so caching it lets us avoid hitting `conversations.info` on every channel
+/// every refresh just to ask "is this still starred?".
+///
+/// Entries older than `freshTTL` are still consulted (so we treat a stale-but-
+/// previously-starred channel as still starred for one refresh) but flagged
+/// for re-fetch when the API budget allows.
+struct SlackStarredCache: Codable {
+    var entries: [String: Entry] = [:]
+    struct Entry: Codable {
+        var isStarred: Bool
+        var fetchedAt: Date
+    }
+
+    static let freshTTL: TimeInterval = 60 * 60   // 1 hour
+
+    static func load(teamID: String) -> SlackStarredCache {
+        guard let data = UserDefaults.standard.data(forKey: key(teamID)),
+              let cache = try? JSONDecoder().decode(SlackStarredCache.self, from: data)
+        else { return SlackStarredCache() }
+        return cache
+    }
+
+    func save(teamID: String) {
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        UserDefaults.standard.set(data, forKey: Self.key(teamID))
+    }
+
+    static func clear(teamID: String) {
+        UserDefaults.standard.removeObject(forKey: key(teamID))
+    }
+
+    private static func key(_ teamID: String) -> String {
+        "lede.slack.\(teamID).starredCache"
+    }
+
+    func isStarred(_ channelID: String) -> Bool? {
+        entries[channelID]?.isStarred
+    }
+    func isFresh(_ channelID: String, now: Date = Date()) -> Bool {
+        guard let e = entries[channelID] else { return false }
+        return now.timeIntervalSince(e.fetchedAt) < Self.freshTTL
+    }
+    mutating func record(_ channelID: String, isStarred: Bool, at: Date = Date()) {
+        entries[channelID] = Entry(isStarred: isStarred, fetchedAt: at)
+    }
+}
+
+// MARK: - Source
+
 struct SlackSource: NotificationSource {
     let account: Account
     let source: Source = .slack
@@ -126,23 +255,47 @@ struct SlackSource: NotificationSource {
         Keychain.get(Keychain.Key.slackAccess(account.id)) != nil
     }
 
+    /// Hard cap on `conversations.info` calls per refresh. Slack rates that
+    /// method at Tier 3 (~50/min); we throttle to ~40/min and cap absolute
+    /// volume so a workspace with thousands of channels can't stall us forever.
+    private static let infoCallBudget = 80
+
+    /// Sleep between successive `conversations.info` calls. ~40/min → leaves
+    /// headroom under the 50/min Tier 3 limit and keeps the budget tractable.
+    private static let infoCallSpacing: TimeInterval = 1.5
+
     func fetch() async throws -> [RawItem] {
         guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return [] }
         let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
         let teamID = account.id
+        let prefs = SlackPrefs(teamID: teamID)
 
-        // Pull every conversation the user participates in (paginated), then
-        // only look at the ones with unread messages. Keeps volume bounded.
+        // Cheap listing of every conversation the user can see. Type pre-filter
+        // happens here so private/public channels don't pollute the candidate
+        // set when the user has channelMode == .off and no allowlist.
         let convos = try await Self.allConversations(token: token)
-        let unread = convos.filter { ($0.unread_count_display ?? 0) > 0 }
-        Log.info("slack[\(account.label)]: \(convos.count) conversation(s), \(unread.count) unread")
+        var cache = SlackStarredCache.load(teamID: teamID)
+
+        let candidates = Self.candidates(from: convos, prefs: prefs, cache: cache)
+        Log.info("slack[\(account.label)]: \(convos.count) conversation(s), \(candidates.count) candidate(s) after pre-filter")
+
+        // Fetch authoritative unread state + is_starred for each candidate.
+        // Rate-limited and budgeted; surplus candidates are dropped this refresh
+        // and will be picked up next cycle (the cache gradually fills in).
+        let infos = await Self.fetchInfos(
+            for: candidates, token: token, prefs: prefs, cache: &cache
+        )
+        cache.save(teamID: teamID)
+
+        let surviving = infos.filter { Self.shouldSurface($0, prefs: prefs) }
+        Log.info("slack[\(account.label)]: \(surviving.count) unread conversation(s) after info fetch")
+
         let users = await Self.userNameCache(token: token)
         let acct = account
-
         return try await withThrowingTaskGroup(of: RawItem?.self) { group in
-            for c in unread {
+            for info in surviving {
                 group.addTask {
-                    try await Self.buildItem(channel: c, token: token, users: users,
+                    try await Self.buildItem(info: info, token: token, users: users,
                                              userID: userID, teamID: teamID, account: acct)
                 }
             }
@@ -152,24 +305,31 @@ struct SlackSource: NotificationSource {
         }
     }
 
-    // MARK: - Conversations
+    // MARK: - Conversations (cheap listing)
 
-    private struct Conversation: Decodable {
+    /// Trimmed shape of what `users.conversations` returns. We deliberately
+    /// don't decode `unread_count_display` here — that field is unreliable on
+    /// this endpoint (often nil), which is the bug that motivated this rewrite.
+    /// Authoritative unread state comes from `conversations.info` instead.
+    /// Internal so tests can construct Conversation fixtures and exercise the
+    /// candidate / surfacing logic without hitting Slack.
+    struct Conversation: Decodable {
         let id: String
         let name: String?
         let is_im: Bool?
         let is_mpim: Bool?
         let is_channel: Bool?
-        let user: String?  // DM partner user id
-        let unread_count_display: Int?
+        let is_private: Bool?
+        let is_member: Bool?
+        let user: String?           // DM partner user id
     }
 
-    /// Paginate through every conversation the user is a member of.
-    /// Cap at a reasonable total so a very large workspace doesn't lock us up.
+    /// Paginate through every conversation the user is a member of (or sees,
+    /// for DMs). Capped so a very large workspace doesn't lock us up.
     private static func allConversations(token: String) async throws -> [Conversation] {
         var all: [Conversation] = []
         var cursor: String? = nil
-        let maxTotal = 500
+        let maxTotal = 2000
         repeat {
             var comps = URLComponents(string: "https://slack.com/api/users.conversations")!
             var items: [URLQueryItem] = [
@@ -182,7 +342,6 @@ struct SlackSource: NotificationSource {
 
             let (data, resp): (Data, URLResponse) = try await slackGet(comps.url!, token: token)
             if let http = resp as? HTTPURLResponse, http.statusCode == 429 {
-                // Rate-limited. Honor Retry-After and try once more.
                 let wait = Int(http.value(forHTTPHeaderField: "Retry-After") ?? "1") ?? 1
                 try await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
                 continue
@@ -203,6 +362,180 @@ struct SlackSource: NotificationSource {
             cursor = next.isEmpty ? nil : next
         } while cursor != nil && all.count < maxTotal
         return all
+    }
+
+    // MARK: - Pre-filter
+
+    /// Decide which conversations are worth a `conversations.info` round-trip
+    /// based on prefs alone (no API). Order of precedence:
+    ///   1. Denylist (by name) wins, full stop.
+    ///   2. Allowlist (by name) forces inclusion.
+    ///   3. Type toggles (DMs / MPIMs).
+    ///   4. Channel mode + cached starred status for member channels.
+    static func candidates(from convos: [Conversation],
+                           prefs: SlackPrefs,
+                           cache: SlackStarredCache) -> [Conversation] {
+        let allow = prefs.allowlist
+        let deny = prefs.denylist
+        let mode = prefs.channelMode
+
+        return convos.filter { c in
+            let name = (c.name ?? "").lowercased()
+            if !name.isEmpty && deny.contains(name) { return false }
+            if !name.isEmpty && allow.contains(name) { return true }
+
+            if c.is_im == true { return prefs.includeDMs }
+            if c.is_mpim == true { return prefs.includeMPIMs }
+
+            // Public / private channel from here down.
+            guard c.is_member == true else { return false }
+            if mode != .off { return true }
+            if prefs.includeStarred && cache.isStarred(c.id) == true { return true }
+            // Even with mode == .off and not-currently-cached, give the channel
+            // one shot at conversations.info if its starred state is unknown so
+            // the cache fills in on first run. The budget below caps total cost.
+            if prefs.includeStarred && cache.entries[c.id] == nil { return true }
+            return false
+        }
+    }
+
+    // MARK: - conversations.info (authoritative state)
+
+    /// Authoritative per-channel state. Fields here come from `conversations.info`
+    /// which (unlike `users.conversations`) reliably populates unread counts.
+    /// Internal so tests can synthesize `ConversationInfo` fixtures for
+    /// `shouldSurface` without round-tripping through Slack's API.
+    struct ConversationInfo {
+        let id: String
+        let name: String?
+        let isIM: Bool
+        let isMPIM: Bool
+        let dmUser: String?
+        let isStarred: Bool
+        let unreadCount: Int            // every unread message
+        let unreadCountDisplay: Int     // mentions / threads / DMs
+        let lastReadTS: String?
+    }
+
+    /// Run `conversations.info` against each candidate, sequentially, with
+    /// rate-limit pacing. Honors a hard budget so we don't get stuck on
+    /// pathological workspaces. Updates the starred cache in place.
+    private static func fetchInfos(for candidates: [Conversation],
+                                   token: String,
+                                   prefs: SlackPrefs,
+                                   cache: inout SlackStarredCache) async -> [ConversationInfo] {
+        // Prioritize: DMs/MPIMs first (always high signal), then allowlist,
+        // then known-starred channels, then everything else. Keeps the budget
+        // spent on the items most likely to matter. Snapshotted into a Set so
+        // the closure doesn't capture the inout cache.
+        let allow = prefs.allowlist
+        let knownStarred: Set<String> = Set(cache.entries.compactMap { $0.value.isStarred ? $0.key : nil })
+        let priority: (Conversation) -> Int = { c in
+            if c.is_im == true { return 0 }
+            if c.is_mpim == true { return 1 }
+            let name = (c.name ?? "").lowercased()
+            if !name.isEmpty && allow.contains(name) { return 2 }
+            if knownStarred.contains(c.id) { return 3 }
+            return 4
+        }
+        let ordered = candidates.sorted { priority($0) < priority($1) }
+
+        var out: [ConversationInfo] = []
+        var calls = 0
+        for c in ordered {
+            if calls >= infoCallBudget {
+                Log.warn("slack: conversations.info budget (\(infoCallBudget)) hit; \(candidates.count - calls) candidate(s) deferred to next refresh")
+                break
+            }
+            if calls > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(infoCallSpacing * 1_000_000_000))
+            }
+            calls += 1
+            if let info = await Self.conversationInfo(channelID: c.id, token: token, fallback: c) {
+                cache.record(c.id, isStarred: info.isStarred)
+                out.append(info)
+            }
+        }
+        return out
+    }
+
+    /// Single `conversations.info` round-trip. Returns nil on transient errors
+    /// so one bad channel doesn't take down the whole refresh.
+    private static func conversationInfo(channelID: String,
+                                         token: String,
+                                         fallback: Conversation) async -> ConversationInfo? {
+        var comps = URLComponents(string: "https://slack.com/api/conversations.info")!
+        comps.queryItems = [
+            .init(name: "channel", value: channelID),
+            .init(name: "include_num_members", value: "false"),
+        ]
+        guard let (data, resp) = try? await slackGet(comps.url!, token: token) else { return nil }
+        if let http = resp as? HTTPURLResponse, http.statusCode == 429 {
+            let wait = Int(http.value(forHTTPHeaderField: "Retry-After") ?? "1") ?? 1
+            try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
+            return nil
+        }
+        struct Resp: Decodable {
+            let ok: Bool
+            let error: String?
+            let channel: Channel?
+            struct Channel: Decodable {
+                let id: String
+                let name: String?
+                let is_im: Bool?
+                let is_mpim: Bool?
+                let user: String?
+                let is_starred: Bool?
+                let unread_count: Int?
+                let unread_count_display: Int?
+                let last_read: String?
+            }
+        }
+        guard let parsed = try? JSONDecoder().decode(Resp.self, from: data),
+              parsed.ok, let ch = parsed.channel else { return nil }
+        return ConversationInfo(
+            id: ch.id,
+            name: ch.name ?? fallback.name,
+            isIM: ch.is_im ?? (fallback.is_im ?? false),
+            isMPIM: ch.is_mpim ?? (fallback.is_mpim ?? false),
+            dmUser: ch.user ?? fallback.user,
+            isStarred: ch.is_starred ?? false,
+            unreadCount: ch.unread_count ?? 0,
+            unreadCountDisplay: ch.unread_count_display ?? 0,
+            lastReadTS: ch.last_read
+        )
+    }
+
+    // MARK: - Final filter
+
+    /// Decide whether a channel's authoritative state warrants surfacing as a
+    /// notification. Mirrors the pre-filter precedence so allowlist/starred/type
+    /// each trigger inclusion, but only when there's *actual* unread activity
+    /// — we never surface a channel that's already been read.
+    static func shouldSurface(_ info: ConversationInfo, prefs: SlackPrefs) -> Bool {
+        let name = (info.name ?? "").lowercased()
+        if !name.isEmpty && prefs.denylist.contains(name) { return false }
+
+        // Allowlist & starred: any unread message qualifies, since the user
+        // explicitly said "watch this channel."
+        if !name.isEmpty && prefs.allowlist.contains(name) {
+            return info.unreadCount > 0
+        }
+        if prefs.includeStarred && info.isStarred {
+            return info.unreadCount > 0
+        }
+
+        // DMs / MPIMs: any unread message; `unread_count_display` for DMs
+        // matches `unread_count` so either works, but unreadCount is simpler.
+        if info.isIM { return prefs.includeDMs && info.unreadCount > 0 }
+        if info.isMPIM { return prefs.includeMPIMs && info.unreadCount > 0 }
+
+        // Member channels: gated on the channel mode.
+        switch prefs.channelMode {
+        case .off:       return false
+        case .mentions:  return info.unreadCountDisplay > 0
+        case .all:       return info.unreadCount > 0
+        }
     }
 
     // MARK: - User directory
@@ -242,7 +575,7 @@ struct SlackSource: NotificationSource {
 
     // MARK: - Messages
 
-    private static func buildItem(channel: Conversation,
+    private static func buildItem(info: ConversationInfo,
                                   token: String,
                                   users: [String: String],
                                   userID: String?,
@@ -250,7 +583,7 @@ struct SlackSource: NotificationSource {
                                   account: Account) async throws -> RawItem? {
         var comps = URLComponents(string: "https://slack.com/api/conversations.history")!
         comps.queryItems = [
-            .init(name: "channel", value: channel.id),
+            .init(name: "channel", value: info.id),
             .init(name: "limit", value: "1"),
         ]
         guard let (data, _) = try? await slackGet(comps.url!, token: token) else { return nil }
@@ -268,10 +601,10 @@ struct SlackSource: NotificationSource {
 
         let sender = msg.user.flatMap { users[$0] } ?? msg.user
         let channelName: String = {
-            if channel.is_im == true, let u = channel.user { return "DM: \(users[u] ?? u)" }
-            if channel.is_mpim == true { return "Group DM" }
-            if let n = channel.name { return "#\(n)" }
-            return channel.id
+            if info.isIM, let u = info.dmUser { return "DM: \(users[u] ?? u)" }
+            if info.isMPIM { return "Group DM" }
+            if let n = info.name { return "#\(n)" }
+            return info.id
         }()
         let received: Date = {
             if let ts = msg.ts, let t = Double(ts.split(separator: ".").first.map(String.init) ?? "") {
@@ -291,7 +624,7 @@ struct SlackSource: NotificationSource {
         let url: URL? = {
             var parts: [URLQueryItem] = [
                 .init(name: "team", value: teamID),
-                .init(name: "id", value: channel.id),
+                .init(name: "id", value: info.id),
             ]
             if let ts = msg.ts { parts.append(.init(name: "message", value: ts)) }
             var c = URLComponents()
@@ -302,7 +635,7 @@ struct SlackSource: NotificationSource {
         }()
 
         return RawItem(
-            id: "\(channel.id):\(msg.ts ?? "")",
+            id: "\(info.id):\(msg.ts ?? "")",
             source: .slack,
             accountID: account.id,
             accountLabel: account.label,
