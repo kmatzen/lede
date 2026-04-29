@@ -277,11 +277,23 @@ struct SlackSource: NotificationSource {
         let teamID = account.id
         let prefs = SlackPrefs(teamID: teamID)
 
+        // Diagnostic: confirm token identity + scopes once per refresh. Cheap
+        // (Tier 1, 100/min) and removes a class of "is the token broken?"
+        // hypotheses when reads come back empty.
+        await Self.logAuthTest(token: token, label: account.label)
+
         // Cheap listing of every conversation the user can see. Type pre-filter
         // happens here so private/public channels don't pollute the candidate
         // set when the user has channelMode == .off and no allowlist.
         let convos = try await Self.allConversations(token: token)
         var cache = SlackStarredCache.load(teamID: teamID)
+
+        // Diagnostic: dump full raw conversations.info response body for one
+        // IM, one MPIM, one channel so we can see exactly what fields Slack
+        // populates vs. omits. The same channels get re-probed by the regular
+        // fetch loop below — three duplicate calls per refresh is fine on
+        // Tier 3 and worth it while we're still chasing the empty-state bug.
+        await Self.logTypeSamples(token: token, label: account.label, convos: convos)
 
         // First refresh after connecting a workspace: kick off starred
         // discovery in the background so the user doesn't have to know to
@@ -306,6 +318,16 @@ struct SlackSource: NotificationSource {
             for: candidates, token: token, prefs: prefs, cache: &cache
         )
         cache.save(teamID: teamID)
+
+        // End-of-refresh breakdown: how many of the probed conversations had
+        // any unread, mentions, or starred state? Tells us whether the API
+        // is reporting *anything* — distinguishes "token has no permission"
+        // from "the user genuinely had no unreads in the probed slice."
+        let probedTotal = infos.count
+        let withUnread = infos.filter { $0.unreadCount > 0 }.count
+        let withMentions = infos.filter { $0.unreadCountDisplay > 0 }.count
+        let starred = infos.filter { $0.isStarred }.count
+        Log.info("slack[\(account.label)]: probed \(probedTotal) — \(withUnread) had unread, \(withMentions) had mentions, \(starred) starred")
 
         let surviving = infos.filter { Self.shouldSurface($0, prefs: prefs) }
         Log.info("slack[\(account.label)]: \(surviving.count) unread conversation(s) after info fetch")
@@ -667,7 +689,10 @@ struct SlackSource: NotificationSource {
             }
             done += 1
             onProgress(done, total)
-            if done % 25 == 0 { cache.save(teamID: teamID) }
+            if done % 25 == 0 {
+                cache.save(teamID: teamID)
+                Log.info("slack discover[\(account.label)]: \(done)/\(total) probed (\(foundStarred) starred so far)")
+            }
             if Task.isCancelled { break }
         }
         cache.save(teamID: teamID)
@@ -869,6 +894,54 @@ struct SlackSource: NotificationSource {
         }
         result += ns.substring(from: cursor)
         return result
+    }
+
+    // MARK: - Diagnostic logging
+
+    /// One-shot per refresh: log full `auth.test` response so we can verify
+    /// the token's user_id, team_id, scopes, and whether Slack thinks the
+    /// session is healthy. Token itself is never logged (only sent in
+    /// Authorization header by `slackGet`).
+    private static func logAuthTest(token: String, label: String) async {
+        let url = URL(string: "https://slack.com/api/auth.test")!
+        do {
+            let (data, _) = try await slackGet(url, token: token)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            Log.info("slack[\(label)] auth.test: \(body.prefix(800))")
+        } catch {
+            Log.warn("slack[\(label)] auth.test failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Probe one IM, one MPIM, one channel and dump the raw `conversations.info`
+    /// response body. Lets us see exactly what Slack returns per type vs. what
+    /// our parser expects — critical when state fields come back as zero/null
+    /// across the board and we don't yet know if it's the API or our decode.
+    private static func logTypeSamples(token: String, label: String, convos: [Conversation]) async {
+        let firstIM = convos.first(where: { $0.is_im == true })
+        let firstMPIM = convos.first(where: { $0.is_mpim == true })
+        let firstChannel = convos.first(where: { $0.is_im != true && $0.is_mpim != true })
+        for (kind, c) in [("im", firstIM), ("mpim", firstMPIM), ("channel", firstChannel)] {
+            guard let c else { continue }
+            await logRawInfo(token: token, label: label, kind: kind, channelID: c.id)
+        }
+    }
+
+    /// Single raw `conversations.info` dump used by the type-sample probes.
+    /// Truncated to 1500 chars so a verbose channel doesn't blow up the log.
+    private static func logRawInfo(token: String, label: String, kind: String, channelID: String) async {
+        var comps = URLComponents(string: "https://slack.com/api/conversations.info")!
+        comps.queryItems = [
+            .init(name: "channel", value: channelID),
+            .init(name: "include_num_members", value: "false"),
+        ]
+        do {
+            let (data, _) = try await slackGet(comps.url!, token: token)
+            let body = String(data: data, encoding: .utf8) ?? ""
+            Log.info("slack[\(label)] \(kind)-sample raw: \(body.prefix(1500))")
+        } catch {
+            Log.warn("slack[\(label)] \(kind)-sample failed: \(error.localizedDescription)")
+        }
     }
 
     /// Wrap URLSession with Slack's OAuth bearer header. Returns raw data + response
