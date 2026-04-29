@@ -343,17 +343,20 @@ final class CoreTests: XCTestCase {
                       "channels with no cache entry must not be probed during refresh")
     }
 
-    func testSlackCandidatesSkipsNonMemberChannels() {
+    func testSlackCandidatesIncludesChannelsRegardlessOfIsMember() {
+        // users.conversations doesn't reliably populate is_member, so checking
+        // it dropped every channel from the candidate set on a real workspace.
+        // The endpoint only returns conversations the user is part of by
+        // contract, so we trust the API and skip the explicit check.
         let team = "TEST_TEAM_\(UUID().uuidString)"
         defer { clearSlackPrefs(team: team) }
         let prefs = SlackPrefs(teamID: team)
         prefs.channelMode = .all
 
-        // A public channel the user isn't in shouldn't be probed.
-        let convo = makeChannel(id: "C1", name: "random", isMember: false)
-        let result = SlackSource.candidates(from: [convo], prefs: prefs,
+        let nilMember = makeChannel(id: "C1", name: "random", isMember: false)
+        let result = SlackSource.candidates(from: [nilMember], prefs: prefs,
                                             cache: SlackStarredCache())
-        XCTAssertTrue(result.isEmpty)
+        XCTAssertEqual(result.map(\.id), ["C1"])
     }
 
     // MARK: Slack — shouldSurface (final filter)
