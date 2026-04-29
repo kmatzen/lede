@@ -110,6 +110,9 @@ enum SlackOAuth {
         Keychain.delete(Keychain.Key.slackClientSecret(accountID))
         Keychain.delete(Keychain.Key.slackUserID(accountID))
         SlackStarredCache.clear(teamID: accountID)
+        // Reset the auto-discovery flag so reconnecting the workspace
+        // re-runs the one-time starred walk.
+        UserDefaults.standard.removeObject(forKey: "lede.slack.\(accountID).autoDiscoveryInitiated")
     }
 
     private static func randomHex(_ bytes: Int) -> String {
@@ -279,6 +282,13 @@ struct SlackSource: NotificationSource {
         let convos = try await Self.allConversations(token: token)
         var cache = SlackStarredCache.load(teamID: teamID)
 
+        // First refresh after connecting a workspace: kick off starred
+        // discovery in the background so the user doesn't have to know to
+        // click the Settings button. Idempotent across launches via a
+        // UserDefaults flag — discovery walks ~50 channels/min, so we don't
+        // want to re-run it unnecessarily.
+        Self.maybeAutoDiscoverStarred(account: account, prefs: prefs, cache: cache)
+
         let candidates = Self.candidates(from: convos, prefs: prefs, cache: cache)
         Log.info("slack[\(account.label)]: \(convos.count) conversation(s), \(candidates.count) candidate(s) after pre-filter")
 
@@ -382,6 +392,14 @@ struct SlackSource: NotificationSource {
     ///   2. Allowlist (by name) forces inclusion.
     ///   3. Type toggles (DMs / MPIMs).
     ///   4. Channel mode + cached starred status for member channels.
+    /// Hard cap on IMs that survive the pre-filter. `users.conversations`
+    /// returns every IM the user has ever DM'd (often 1k+ on a busy workspace);
+    /// without this cap they'd consume the entire conversations.info budget
+    /// per refresh and never leave room for MPIMs / starred / channels. We
+    /// keep the first N as Slack returns them — order is undocumented but
+    /// observed to be roughly recency/activity-weighted in practice.
+    static let imCandidateCap = 150
+
     static func candidates(from convos: [Conversation],
                            prefs: SlackPrefs,
                            cache: SlackStarredCache) -> [Conversation] {
@@ -389,17 +407,19 @@ struct SlackSource: NotificationSource {
         let deny = prefs.denylist
         let mode = prefs.channelMode
 
-        return convos.filter { c in
+        let filtered = convos.filter { c in
             let name = (c.name ?? "").lowercased()
             if !name.isEmpty && deny.contains(name) { return false }
             if !name.isEmpty && allow.contains(name) { return true }
 
-            // IMs/MPIMs: only count ones the user has open in their sidebar.
-            // Slack will happily return every IM you've ever sent including
-            // years-old closed ones; without this filter a workspace can have
-            // thousands of dead DMs that swamp the conversations.info budget.
-            if c.is_im == true { return prefs.includeDMs && c.is_open == true }
-            if c.is_mpim == true { return prefs.includeMPIMs && c.is_open == true }
+            // IMs/MPIMs gate purely on the pref toggles. We previously also
+            // required `is_open == true` to drop dormant DMs, but that field
+            // isn't actually returned by `users.conversations` — only by
+            // `conversations.info` — so the check evaluated false for every
+            // IM and pre-filtered the entire candidate set away. The IM cap
+            // applied below is what now bounds candidate volume.
+            if c.is_im == true { return prefs.includeDMs }
+            if c.is_mpim == true { return prefs.includeMPIMs }
 
             // Public / private channel from here down.
             guard c.is_member == true else { return false }
@@ -411,6 +431,13 @@ struct SlackSource: NotificationSource {
             if prefs.includeStarred && cache.isStarred(c.id) == true { return true }
             return false
         }
+        // Apply the IM cap. Splitting then concatenating preserves Slack's
+        // original ordering for both halves so the downstream priority sort
+        // stays stable.
+        let allowedIMs = filtered.filter { $0.is_im == true }
+        let cappedIMs = Array(allowedIMs.prefix(imCandidateCap))
+        let nonIMs = filtered.filter { $0.is_im != true }
+        return cappedIMs + nonIMs
     }
 
     // MARK: - conversations.info (authoritative state)
@@ -536,6 +563,35 @@ struct SlackSource: NotificationSource {
             unreadCountDisplay: ch.unread_count_display ?? 0,
             lastReadTS: ch.last_read
         )
+    }
+
+    // MARK: - Starred discovery
+
+    /// Persistent flag: have we ever fired auto-discovery for this workspace?
+    /// Prevents repeatedly walking 1000-channel workspaces just because the
+    /// cache happens to be empty for some other reason (e.g. user wiped it).
+    private static func autoDiscoveredKey(_ teamID: String) -> String {
+        "lede.slack.\(teamID).autoDiscoveryInitiated"
+    }
+
+    /// Conditions a fire-and-forget `discoverStarred` call against:
+    ///   - includeStarred is on (user actually wants starred channels surfaced)
+    ///   - the cache is empty (we have no idea which channels are starred)
+    ///   - we haven't already kicked off auto-discovery for this workspace
+    /// All three must hold. Sets the persistent flag immediately so a fast
+    /// second refresh doesn't double-fire while the first is still running.
+    static func maybeAutoDiscoverStarred(account: Account,
+                                         prefs: SlackPrefs,
+                                         cache: SlackStarredCache) {
+        guard prefs.includeStarred, cache.entries.isEmpty else { return }
+        let flag = autoDiscoveredKey(account.id)
+        guard !UserDefaults.standard.bool(forKey: flag) else { return }
+        UserDefaults.standard.set(true, forKey: flag)
+        let acct = account
+        Log.info("slack[\(acct.label)]: auto-discovering starred channels in background")
+        Task.detached {
+            await SlackSource.discoverStarred(account: acct) { _, _ in }
+        }
     }
 
     // MARK: - Starred discovery (one-shot, opt-in)
