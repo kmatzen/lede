@@ -510,18 +510,20 @@ struct SlackSource: NotificationSource {
                                    token: String,
                                    prefs: SlackPrefs,
                                    cache: inout SlackStarredCache) async -> [ConversationInfo] {
-        // Prioritize: DMs/MPIMs first (always high signal), then allowlist,
-        // then known-starred channels, then everything else. Keeps the budget
-        // spent on the items most likely to matter. Snapshotted into a Set so
-        // the closure doesn't capture the inout cache.
+        // Prioritize: DMs first, then user-curated channels (allowlist +
+        // known-starred), then MPIMs, then everything else. Earlier versions
+        // had MPIMs at priority 1, but workspaces with hundreds of stale group
+        // DMs (e.g. 883 MPIMs on the test workspace) were starving out the
+        // 13 starred channels that the user actually cares about. Snapshotted
+        // into a Set so the closure doesn't capture the inout cache.
         let allow = prefs.allowlist
         let knownStarred: Set<String> = Set(cache.entries.compactMap { $0.value.isStarred ? $0.key : nil })
         let priority: (Conversation) -> Int = { c in
             if c.is_im == true { return 0 }
-            if c.is_mpim == true { return 1 }
             let name = (c.name ?? "").lowercased()
-            if !name.isEmpty && allow.contains(name) { return 2 }
-            if knownStarred.contains(c.id) { return 3 }
+            if !name.isEmpty && allow.contains(name) { return 1 }
+            if knownStarred.contains(c.id) { return 2 }
+            if c.is_mpim == true { return 3 }
             return 4
         }
         let ordered = candidates.sorted { priority($0) < priority($1) }
