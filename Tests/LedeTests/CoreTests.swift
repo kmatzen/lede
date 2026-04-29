@@ -274,6 +274,44 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(result.map(\.id), ["C1"])
     }
 
+    func testSlackCandidatesSkipsClosedIMs() {
+        // Slack returns every IM you've ever DM'd in users.conversations,
+        // even ones you closed years ago. Without the is_open filter those
+        // dead DMs swamp the conversations.info budget on first refresh.
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+
+        let openIM = makeIM(id: "D_open", isOpen: true)
+        let closedIM = makeIM(id: "D_closed", isOpen: false)
+        let openMPIM = makeMPIM(id: "G_open", isOpen: true)
+        let closedMPIM = makeMPIM(id: "G_closed", isOpen: false)
+        let result = SlackSource.candidates(
+            from: [openIM, closedIM, openMPIM, closedMPIM],
+            prefs: prefs, cache: SlackStarredCache()
+        )
+        XCTAssertEqual(Set(result.map(\.id)), ["D_open", "G_open"])
+    }
+
+    func testSlackCandidatesNeverProbesUnknownStarredChannel() {
+        // Old behavior bulk-probed every member channel with empty cache to
+        // discover stars on first run, which wedged budgets on big workspaces.
+        // Verify that includeStarred + empty cache does NOT include unknown
+        // channels — they only come in via the explicit discoverStarred path.
+        let team = "TEST_TEAM_\(UUID().uuidString)"
+        defer { clearSlackPrefs(team: team) }
+        let prefs = SlackPrefs(teamID: team)
+        prefs.channelMode = .off
+        prefs.includeStarred = true
+
+        let unknownChannel = makeChannel(id: "C1", name: "general", isMember: true)
+        let result = SlackSource.candidates(
+            from: [unknownChannel], prefs: prefs, cache: SlackStarredCache()
+        )
+        XCTAssertTrue(result.isEmpty,
+                      "channels with no cache entry must not be probed during refresh")
+    }
+
     func testSlackCandidatesSkipsNonMemberChannels() {
         let team = "TEST_TEAM_\(UUID().uuidString)"
         defer { clearSlackPrefs(team: team) }
@@ -377,25 +415,25 @@ final class CoreTests: XCTestCase {
             id: id, name: name,
             is_im: false, is_mpim: false,
             is_channel: true, is_private: false,
-            is_member: isMember, user: nil
+            is_member: isMember, user: nil, is_open: nil
         )
     }
 
-    private func makeIM(id: String) -> SlackSource.Conversation {
+    private func makeIM(id: String, isOpen: Bool = true) -> SlackSource.Conversation {
         SlackSource.Conversation(
             id: id, name: nil,
             is_im: true, is_mpim: false,
             is_channel: false, is_private: false,
-            is_member: nil, user: "U_partner"
+            is_member: nil, user: "U_partner", is_open: isOpen
         )
     }
 
-    private func makeMPIM(id: String) -> SlackSource.Conversation {
+    private func makeMPIM(id: String, isOpen: Bool = true) -> SlackSource.Conversation {
         SlackSource.Conversation(
             id: id, name: nil,
             is_im: false, is_mpim: true,
             is_channel: false, is_private: false,
-            is_member: nil, user: nil
+            is_member: nil, user: nil, is_open: isOpen
         )
     }
 
