@@ -290,7 +290,13 @@ struct SlackSource: NotificationSource {
         Self.maybeAutoDiscoverStarred(account: account, prefs: prefs, cache: cache)
 
         let candidates = Self.candidates(from: convos, prefs: prefs, cache: cache)
-        Log.info("slack[\(account.label)]: \(convos.count) conversation(s), \(candidates.count) candidate(s) after pre-filter")
+        // Type breakdown so we can sanity-check pre-filter math against the
+        // raw API shape (e.g. "are 880 of those candidates really MPIMs, or
+        // are channels slipping through?").
+        let imCount = convos.filter { $0.is_im == true }.count
+        let mpimCount = convos.filter { $0.is_mpim == true }.count
+        let channelCount = convos.count - imCount - mpimCount
+        Log.info("slack[\(account.label)]: \(convos.count) conversation(s) [\(imCount) IM, \(mpimCount) MPIM, \(channelCount) channel], \(candidates.count) candidate(s) after pre-filter")
 
         // Fetch authoritative unread state + is_starred for each candidate.
         // Rate-limited and budgeted; surplus candidates are dropped this refresh
@@ -421,8 +427,11 @@ struct SlackSource: NotificationSource {
             if c.is_im == true { return prefs.includeDMs }
             if c.is_mpim == true { return prefs.includeMPIMs }
 
-            // Public / private channel from here down.
-            guard c.is_member == true else { return false }
+            // Public / private channel from here down. We previously gated
+            // this on `c.is_member == true`, but that field — like `is_open`
+            // — isn't reliably populated by `users.conversations`. Since the
+            // endpoint only returns conversations the user is a member of by
+            // contract, we just trust it and drop the explicit check.
             if mode != .off { return true }
             // Starred channels: only ones the cache *already knows* are starred.
             // First-run discovery is a separate, explicit one-shot via
@@ -616,9 +625,12 @@ struct SlackSource: NotificationSource {
         }
 
         let toProbe = convos.filter { c in
-            // Member channels (not IMs/MPIMs) we haven't probed before.
+            // Channels (everything that isn't an IM or MPIM) we haven't probed
+            // before. We don't check `is_member` because users.conversations
+            // doesn't reliably return that field — and only returns conversations
+            // the user is part of in the first place, by API contract.
             let isChannel = (c.is_im != true && c.is_mpim != true)
-            return isChannel && c.is_member == true && cache.entries[c.id] == nil
+            return isChannel && cache.entries[c.id] == nil
         }
         let total = toProbe.count
         Log.info("slack discover[\(account.label)]: \(total) channel(s) to probe")
