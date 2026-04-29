@@ -160,5 +160,15 @@
                        type="application/octet-stream"
                        sparkle:edSignature="Iu1QAw+FUdGWhFuEE4YXMcf9uy1nfTXgbjGhN0Xqrf/Zrih6v+Y1jLW7fzYZVdnv9etaf/l05Cm9xJMjCY5OBw==" length="6499650" />
         </item>
+            <item>
+            <title>Version 0.1.17</title>
+            <pubDate>Wed, 29 Apr 2026 18:16:51 +0000</pubDate>
+            <sparkle:version>0.1.17</sparkle:version>
+            <sparkle:shortVersionString>0.1.17</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/kmatzen/lede/releases/download/v0.1.17/Lede-0.1.17.dmg"
+                       type="application/octet-stream"
+                       sparkle:edSignature="XJKxam4US5bb+Ch46XEBAHDuYeorgxeTnMrETWULmVi9Ae8SMlLXoMGYUYwEyg3WOmNO3WvTJUI+jmxtGjizCA==" length="6499652" />
+        </item>
     </channel>
 </rss>
