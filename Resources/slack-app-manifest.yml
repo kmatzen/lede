@@ -23,6 +23,7 @@ oauth_config:
       - im:read
       - mpim:history
       - mpim:read
+      - search:read
       - users:read
 settings:
   org_deploy_enabled: false
