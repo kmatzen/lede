@@ -304,6 +304,44 @@ final class CoreTests: XCTestCase {
                        "https://github.com/acme/widgets")
     }
 
+    // MARK: Google Calendar enumeration
+
+    private func gcal(id: String, summary: String? = nil,
+                      selected: Bool? = nil, primary: Bool? = nil) -> GoogleCalendarSource.CalendarEntry {
+        GoogleCalendarSource.CalendarEntry(
+            id: id, summary: summary, selected: selected, primary: primary, accessRole: "reader"
+        )
+    }
+
+    func testGCalQueriesPrimaryAndSelected() {
+        let listed = [
+            gcal(id: "primary@example.com", summary: "Personal", primary: true),
+            gcal(id: "team@group.calendar.google.com", summary: "Team", selected: true),
+            gcal(id: "holidays@group.v.calendar.google.com", summary: "Holidays", selected: false),
+            gcal(id: "shared@example.com", summary: "Shared (hidden)", selected: nil),
+        ]
+        let chosen = GoogleCalendarSource.calendarsToQuery(listed).map(\.id)
+        XCTAssertEqual(chosen, ["primary@example.com", "team@group.calendar.google.com"])
+    }
+
+    func testGCalIncludesPrimaryEvenWhenSelectedFalse() {
+        // Primary calendar should always be queried — it's the canonical
+        // place invites show up regardless of the user's display toggle.
+        let listed = [
+            gcal(id: "primary@example.com", summary: "Personal", selected: false, primary: true),
+        ]
+        let chosen = GoogleCalendarSource.calendarsToQuery(listed).map(\.id)
+        XCTAssertEqual(chosen, ["primary@example.com"])
+    }
+
+    func testGCalFallsBackToPrimaryWhenListEmpty() {
+        // calendarList lookup failed or returned nothing — never regress
+        // to silent / no-events; query the canonical "primary" alias.
+        let chosen = GoogleCalendarSource.calendarsToQuery([])
+        XCTAssertEqual(chosen.map(\.id), ["primary"])
+        XCTAssertEqual(chosen.first?.primary, true)
+    }
+
     // MARK: GitHub Link header parsing
 
     func testGitHubParseNextLinkPicksRelNext() {
