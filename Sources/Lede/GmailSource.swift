@@ -284,10 +284,16 @@ struct GmailSource: NotificationSource {
             return .errored
         }
 
-        // Filter out promotional / social / update-bucket mail here, since the
-        // metadata scope doesn't let us express this in the list query.
-        let skipLabels: Set<String> = ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_UPDATES", "SPAM", "TRASH"]
-        if !Set(m.labelIds ?? []).isDisjoint(with: skipLabels) { return .filtered }
+        // Drop only what Gmail+the user have explicitly demoted. We used to
+        // also filter CATEGORY_PROMOTIONS / SOCIAL / UPDATES wholesale, but
+        // Gmail mis-categorizes constantly — UPDATES in particular catches
+        // order confirmations, billing notices, security alerts, password
+        // resets, and calendar invites. Letting them through and trusting
+        // the triage prompt to score promotional noise low loses fewer real
+        // notifications.
+        let labels = Set(m.labelIds ?? [])
+        let skipLabels: Set<String> = ["SPAM", "TRASH"]
+        if !labels.isDisjoint(with: skipLabels) { return .filtered }
 
         let headers = Dictionary(uniqueKeysWithValues: (m.payload?.headers ?? []).map { ($0.name.lowercased(), $0.value) })
         let subject = headers["subject"] ?? "(no subject)"
