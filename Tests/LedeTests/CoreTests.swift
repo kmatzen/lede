@@ -230,6 +230,80 @@ final class CoreTests: XCTestCase {
         }
     }
 
+    // MARK: GitHub htmlURL rewrite
+
+    private func ghNotification(subjectType: String, subjectURL: String?, repoFullName: String = "acme/widgets") -> GitHubSource.GHNotification {
+        // Round-trip through JSON so we don't have to make every wire
+        // type's init public — the rewrite logic only reads a few fields.
+        let payload: [String: Any] = [
+            "id": "1",
+            "unread": true,
+            "reason": "subscribed",
+            "updated_at": "2026-05-10T00:00:00Z",
+            "subject": [
+                "title": "t",
+                "type": subjectType,
+                "url": subjectURL as Any,
+            ],
+            "repository": ["full_name": repoFullName],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        return try! JSONDecoder.iso.decode(GitHubSource.GHNotification.self, from: data)
+    }
+
+    func testGitHubHtmlURLRewritesPullRequest() {
+        let n = ghNotification(
+            subjectType: "PullRequest",
+            subjectURL: "https://api.github.com/repos/acme/widgets/pulls/42"
+        )
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets/pull/42")
+    }
+
+    func testGitHubHtmlURLRewritesCommit() {
+        let n = ghNotification(
+            subjectType: "Commit",
+            subjectURL: "https://api.github.com/repos/acme/widgets/commits/abcdef0123"
+        )
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets/commit/abcdef0123")
+    }
+
+    func testGitHubHtmlURLPassesThroughIssue() {
+        let n = ghNotification(
+            subjectType: "Issue",
+            subjectURL: "https://api.github.com/repos/acme/widgets/issues/77"
+        )
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets/issues/77")
+    }
+
+    func testGitHubHtmlURLNullDiscussionFallsBackToDiscussionsTab() {
+        // GitHub returns subject.url=null for Discussion notifications;
+        // before the fix we'd return a nil URL and the row had no
+        // click target.
+        let n = ghNotification(subjectType: "Discussion", subjectURL: nil)
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets/discussions")
+    }
+
+    func testGitHubHtmlURLCheckSuiteFallsBackToActionsTab() {
+        // /check-suites/<id> has no public HTML twin — fall back to the
+        // repo's actions tab rather than a 404.
+        let n = ghNotification(
+            subjectType: "CheckSuite",
+            subjectURL: "https://api.github.com/repos/acme/widgets/check-suites/123"
+        )
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets/actions")
+    }
+
+    func testGitHubHtmlURLUnknownTypeFallsBackToRepo() {
+        let n = ghNotification(subjectType: "MysteryFutureType", subjectURL: nil)
+        XCTAssertEqual(GitHubSource.htmlURL(for: n)?.absoluteString,
+                       "https://github.com/acme/widgets")
+    }
+
     // MARK: GitHub Link header parsing
 
     func testGitHubParseNextLinkPicksRelNext() {
