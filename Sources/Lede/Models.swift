@@ -168,6 +168,9 @@ struct Digest: Codable {
         let sender: String?
         let url: URL?
         let receivedAt: Date
+        /// 0..10 from Haiku triage. Sentinel `-1` means "not yet ranked"
+        /// (manual-Claude mode), in which case the row appears under
+        /// `unprocessed` rather than `items`.
         let score: Int
         let summary: String
         let reason: String
@@ -175,4 +178,28 @@ struct Digest: Codable {
     let generatedAt: Date
     let items: [Item]           // sorted desc by score
     let synthesis: String?      // optional 2-3 sentence cross-source meta-summary
+    /// Items fetched from sources but not yet ranked by Claude. Populated
+    /// only when the user has manual-Claude mode on; always empty otherwise.
+    let unprocessed: [Item]
+
+    init(generatedAt: Date, items: [Item], synthesis: String?, unprocessed: [Item] = []) {
+        self.generatedAt = generatedAt
+        self.items = items
+        self.synthesis = synthesis
+        self.unprocessed = unprocessed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case generatedAt, items, synthesis, unprocessed
+    }
+
+    /// Hand-written decoder so digests written before manual-mode landed
+    /// (no `unprocessed` field) still decode cleanly.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.generatedAt = try c.decode(Date.self, forKey: .generatedAt)
+        self.items = try c.decode([Item].self, forKey: .items)
+        self.synthesis = try c.decodeIfPresent(String.self, forKey: .synthesis)
+        self.unprocessed = try c.decodeIfPresent([Item].self, forKey: .unprocessed) ?? []
+    }
 }

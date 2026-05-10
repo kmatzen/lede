@@ -92,12 +92,22 @@ struct DigestRowView: View {
         }
     }
 
+    @ViewBuilder
     private var scorePill: some View {
-        Text("\(item.score)")
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .frame(width: 22, height: 22)
-            .background(color.opacity(0.25), in: Circle())
-            .foregroundStyle(color)
+        if item.score < 0 {
+            // Unprocessed (manual-Claude mode) — no score yet.
+            Image(systemName: "questionmark")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(width: 22, height: 22)
+                .background(Color.secondary.opacity(0.18), in: Circle())
+                .foregroundStyle(.secondary)
+        } else {
+            Text("\(item.score)")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(width: 22, height: 22)
+                .background(color.opacity(0.25), in: Circle())
+                .foregroundStyle(color)
+        }
     }
 
     private var color: Color {

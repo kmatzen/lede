@@ -62,7 +62,7 @@ struct PanelView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let digest = engine.digest, !digest.items.isEmpty {
+        if let digest = engine.digest, !(digest.items.isEmpty && digest.unprocessed.isEmpty) {
             digestList(digest)
         } else if engine.isRefreshing {
             centered {
@@ -152,6 +152,15 @@ struct PanelView: View {
         let multi = multiAccountSources
         return ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                if !d.unprocessed.isEmpty {
+                    UnprocessedSection(
+                        items: d.unprocessed,
+                        multiAccountSources: multi,
+                        isRanking: engine.isCallingClaude,
+                        onRank: { Task { await engine.processNow() } },
+                        onDismiss: dismiss
+                    )
+                }
                 if let s = d.synthesis {
                     synthesisBox(s)
                 }
@@ -291,6 +300,61 @@ struct PriorityTier: Identifiable {
         .init(name: "Medium",   range: 4...5,  color: .yellow, defaultExpanded: false),
         .init(name: "Low",      range: 0...3,  color: .gray, defaultExpanded: false),
     ]
+}
+
+/// Header + list of items that haven't been ranked by Claude yet. Only
+/// rendered when the user has manual-Claude mode on (or when items snuck
+/// in unscored for some other reason). The "Rank with Claude" button
+/// triggers a one-shot triage of just these items.
+struct UnprocessedSection: View {
+    let items: [Digest.Item]
+    let multiAccountSources: Set<Source>
+    let isRanking: Bool
+    let onRank: () -> Void
+    let onDismiss: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "tray.full")
+                    .foregroundStyle(.secondary)
+                Text("Unprocessed")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                Text("\(items.count)")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button(action: onRank) {
+                    HStack(spacing: 4) {
+                        if isRanking {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "sparkles")
+                        }
+                        Text(isRanking ? "Ranking…" : "Rank with Claude")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(isRanking)
+                .help("Send these items to Claude for scoring")
+            }
+            VStack(spacing: 6) {
+                ForEach(items) { item in
+                    DigestRowView(
+                        item: item,
+                        showAccountLabel: multiAccountSources.contains(item.source),
+                        onDismiss: { onDismiss(item.contentHash) }
+                    )
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
 }
 
 struct TierSection: View {

@@ -80,12 +80,17 @@ struct TriagePipeline {
     }
 
     /// Run triage on new items, return a digest.
-    func run(items: [RawItem]) async throws -> Digest {
+    /// When `manualMode` is true, items without a cached triage are *not*
+    /// scored by Claude — they land in `Digest.unprocessed` instead, and
+    /// synthesis is skipped. Cached items still flow through normally (no
+    /// Claude calls needed). The user invokes ranking explicitly from the
+    /// panel, which re-runs this method with `manualMode = false`.
+    func run(items: [RawItem], manualMode: Bool = false) async throws -> Digest {
         // Dedupe by content hash.
         var unique: [String: RawItem] = [:]
         for item in items { unique[item.contentHash] = item }
         let deduped = Array(unique.values)
-        Log.info("triage: \(items.count) in → \(deduped.count) after dedupe")
+        Log.info("triage: \(items.count) in → \(deduped.count) after dedupe (manual=\(manualMode))")
 
         // Split: cached vs. needs-triage.
         var triaged: [String: ItemTriage] = [:]
@@ -99,40 +104,44 @@ struct TriagePipeline {
         }
         Log.info("triage: \(triaged.count) cache hit, \(toTriage.count) to score")
 
-        // Triage new items sequentially. Prompt cache keeps subsequent calls cheap.
-        // (Parallelism would fight the cache — stay sequential.)
-        for item in toTriage {
-            do {
-                let t = try await triageOne(item)
-                triaged[item.contentHash] = t
-                // Persist under the versioned cache key. Note: we deliberately
-                // store the ItemTriage with its contentHash field set to the
-                // versioned key (that's Storage's primary key), but then the
-                // in-memory `triaged` dict keys it by the plain contentHash so
-                // assembly below can zip it with RawItems.
-                await storage.putTriage(ItemTriage(
-                    contentHash: cacheKey(for: item),
-                    score: t.score,
-                    summary: t.summary,
-                    reason: t.reason,
-                    createdAt: t.createdAt
-                ))
-            } catch {
-                // Fall back to a neutral triage so the item still shows up.
-                let t = ItemTriage(
-                    contentHash: item.contentHash,
-                    score: 4,
-                    summary: String(item.title.prefix(140)),
-                    reason: "triage failed",
-                    createdAt: Date()
-                )
-                triaged[item.contentHash] = t
+        // In manual mode we never call Claude here — uncached items become
+        // unprocessed rows the user can opt into ranking. In normal mode,
+        // triage them sequentially (prompt cache keeps subsequent calls cheap).
+        if !manualMode {
+            for item in toTriage {
+                do {
+                    let t = try await triageOne(item)
+                    triaged[item.contentHash] = t
+                    // Persist under the versioned cache key. Note: we deliberately
+                    // store the ItemTriage with its contentHash field set to the
+                    // versioned key (that's Storage's primary key), but then the
+                    // in-memory `triaged` dict keys it by the plain contentHash so
+                    // assembly below can zip it with RawItems.
+                    await storage.putTriage(ItemTriage(
+                        contentHash: cacheKey(for: item),
+                        score: t.score,
+                        summary: t.summary,
+                        reason: t.reason,
+                        createdAt: t.createdAt
+                    ))
+                } catch {
+                    // Fall back to a neutral triage so the item still shows up.
+                    let t = ItemTriage(
+                        contentHash: item.contentHash,
+                        score: 4,
+                        summary: String(item.title.prefix(140)),
+                        reason: "triage failed",
+                        createdAt: Date()
+                    )
+                    triaged[item.contentHash] = t
+                }
             }
         }
 
-        // Assemble digest items. Key on the dict-key (plain content hash) since
-        // cached ItemTriages carry a *versioned* hash in their own field (the
-        // Storage primary key), which doesn't match the RawItem hashes.
+        // Assemble digest items from cache hits (and any fresh triages).
+        // Key on the dict-key (plain content hash) since cached ItemTriages
+        // carry a *versioned* hash in their own field (the Storage primary
+        // key), which doesn't match the RawItem hashes.
         let rawByHash = Dictionary(uniqueKeysWithValues: deduped.map { ($0.contentHash, $0) })
         var digestItems: [Digest.Item] = triaged.compactMap { hash, t in
             guard let raw = rawByHash[hash] else { return nil }
@@ -151,11 +160,35 @@ struct TriagePipeline {
             )
         }
 
+        // Manual-mode: build unprocessed rows from the items we deliberately
+        // skipped. Score sentinel = -1 so the panel can render them differently.
+        var unprocessedItems: [Digest.Item] = []
+        if manualMode {
+            for raw in toTriage {
+                unprocessedItems.append(Digest.Item(
+                    contentHash: raw.contentHash,
+                    source: raw.source,
+                    accountID: raw.accountID,
+                    accountLabel: raw.accountLabel,
+                    title: raw.title,
+                    sender: raw.sender,
+                    url: raw.url,
+                    receivedAt: raw.receivedAt,
+                    score: -1,
+                    summary: String(raw.title.prefix(180)),
+                    reason: ""
+                ))
+            }
+        }
+
         // Sticky merge: keep items from the previous digest that aren't in this
         // fetch, as long as they're recent (< 24h). Prevents items vanishing
         // when a source silently stops returning them — e.g. Gmail flipping
-        // an email to read-state because another client opened it.
-        let currentHashes = Set(digestItems.map { $0.contentHash })
+        // an email to read-state because another client opened it. The same
+        // logic applies to the unprocessed list so manual-mode rows don't
+        // disappear between fetches before the user ranks them.
+        var currentHashes = Set(digestItems.map { $0.contentHash })
+        currentHashes.formUnion(unprocessedItems.map(\.contentHash))
         let stickyTTL: TimeInterval = 24 * 3600
         let now = Date()
         let previous = await storage.loadLastDigest()
@@ -165,40 +198,58 @@ struct TriagePipeline {
                     digestItems.append(old)
                 }
             }
+            for old in previous.unprocessed where !currentHashes.contains(old.contentHash) {
+                if now.timeIntervalSince(old.receivedAt) < stickyTTL {
+                    unprocessedItems.append(old)
+                }
+            }
         }
 
         // Drop items the user has explicitly dismissed (persists across refreshes).
         let dismissed = await storage.allDismissed()
-        let beforeDismiss = digestItems.count
+        let beforeDismiss = digestItems.count + unprocessedItems.count
         digestItems.removeAll { dismissed.contains($0.contentHash) }
-        if beforeDismiss != digestItems.count {
-            Log.info("triage: dropped \(beforeDismiss - digestItems.count) dismissed item(s)")
+        unprocessedItems.removeAll { dismissed.contains($0.contentHash) }
+        let droppedDismissed = beforeDismiss - (digestItems.count + unprocessedItems.count)
+        if droppedDismissed > 0 {
+            Log.info("triage: dropped \(droppedDismissed) dismissed item(s)")
         }
-        Log.info("triage: final digest = \(digestItems.count) item(s)")
+        Log.info("triage: final digest = \(digestItems.count) ranked, \(unprocessedItems.count) unprocessed")
 
         digestItems.sort { (a, b) in
             if a.score != b.score { return a.score > b.score }
             return a.receivedAt > b.receivedAt
         }
+        // Newest first for unprocessed; user will rank them, so keep the
+        // ordering predictable.
+        unprocessedItems.sort { $0.receivedAt > $1.receivedAt }
 
         // Synthesis over top 8 — only if the top item is actually interesting.
         // Reuse the previous digest's synthesis when the top-8 hash list is
         // identical: refresh runs every 5 min, but the top items rarely shift,
         // and Sonnet calls eat into the user's Claude subscription window fast.
+        // Skipped entirely in manual mode (Sonnet would defeat the point).
         var synthesis: String? = nil
-        let topN = Array(digestItems.prefix(8))
-        if let first = topN.first, first.score >= 6, topN.count >= 2 {
-            let fingerprint = topN.map(\.contentHash).joined(separator: "|")
-            let prevFingerprint = previous?.items.prefix(8).map(\.contentHash).joined(separator: "|")
-            if let cached = previous?.synthesis, prevFingerprint == fingerprint {
-                synthesis = cached
-                Log.info("triage: synthesis cache hit (top-8 unchanged)")
-            } else {
-                synthesis = try? await synthesize(topN)
+        if !manualMode {
+            let topN = Array(digestItems.prefix(8))
+            if let first = topN.first, first.score >= 6, topN.count >= 2 {
+                let fingerprint = topN.map(\.contentHash).joined(separator: "|")
+                let prevFingerprint = previous?.items.prefix(8).map(\.contentHash).joined(separator: "|")
+                if let cached = previous?.synthesis, prevFingerprint == fingerprint {
+                    synthesis = cached
+                    Log.info("triage: synthesis cache hit (top-8 unchanged)")
+                } else {
+                    synthesis = try? await synthesize(topN)
+                }
             }
         }
 
-        let digest = Digest(generatedAt: Date(), items: digestItems, synthesis: synthesis)
+        let digest = Digest(
+            generatedAt: Date(),
+            items: digestItems,
+            synthesis: synthesis,
+            unprocessed: unprocessedItems
+        )
         await storage.saveDigest(digest)
         return digest
     }
