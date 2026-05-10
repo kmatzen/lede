@@ -189,19 +189,37 @@ struct TriagePipeline {
         // disappear between fetches before the user ranks them.
         var currentHashes = Set(digestItems.map { $0.contentHash })
         currentHashes.formUnion(unprocessedItems.map(\.contentHash))
+        let freshFromFetch = digestItems.count + unprocessedItems.count
         let stickyTTL: TimeInterval = 24 * 3600
         let now = Date()
         let previous = await storage.loadLastDigest()
+        var stickyAdded = 0
         if let previous = previous {
             for old in previous.items where !currentHashes.contains(old.contentHash) {
                 if now.timeIntervalSince(old.receivedAt) < stickyTTL {
                     digestItems.append(old)
+                    stickyAdded += 1
                 }
             }
             for old in previous.unprocessed where !currentHashes.contains(old.contentHash) {
                 if now.timeIntervalSince(old.receivedAt) < stickyTTL {
                     unprocessedItems.append(old)
+                    stickyAdded += 1
                 }
+            }
+        }
+        // Loud-warn when sticky-merge backfilled most of the visible
+        // digest. This is the canary for a genuinely-broken source —
+        // the digest still looks populated thanks to yesterday's items,
+        // but the current fetch added almost nothing. Per-source
+        // hints in CoreEngine pinpoint *which* source; this aggregate
+        // line catches the case where the fetch errored across many
+        // sources at once.
+        let totalVisible = digestItems.count + unprocessedItems.count
+        if totalVisible > 0, stickyAdded > 0 {
+            let pct = Double(stickyAdded) / Double(totalVisible)
+            if pct > 0.5 {
+                Log.warn("triage: sticky-merge backfilled \(stickyAdded)/\(totalVisible) (\(Int(pct * 100))%) of digest — fresh fetch only contributed \(freshFromFetch); possible source regression")
             }
         }
 

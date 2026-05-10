@@ -268,4 +268,59 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(s.lastItemCount, 200)
         XCTAssertEqual(s.omittedCount, 42)
     }
+
+    func testSourceStateDecodesLegacyJSONWithoutRegressionFields() throws {
+        // State files written before the regression-detection landed
+        // had neither `recentItemCounts` nor `regressionHint`. Decoding
+        // must default them or every source's history gets wiped.
+        let json = #"{"lastItemCount":12,"omittedCount":0}"#
+        let s = try JSONDecoder().decode(SourceState.self, from: Data(json.utf8))
+        XCTAssertEqual(s.recentItemCounts, [])
+        XCTAssertNil(s.regressionHint)
+    }
+
+    // MARK: Source regression hint
+
+    func testRegressionHintFiresOnZeroAfterActivity() {
+        let hint = CoreEngine.regressionHint(
+            currentCount: 0, priorWindow: [12, 14, 0, 9],
+            source: .gmail, accountLabel: "kev@example.com"
+        )
+        XCTAssertEqual(hint, "Gmail (kev@example.com) returned 0 — check connection?")
+    }
+
+    func testRegressionHintQuietWhenCurrentNonZero() {
+        // Even with prior activity, a non-zero current means we're
+        // still hearing from the source. No hint needed.
+        let hint = CoreEngine.regressionHint(
+            currentCount: 3, priorWindow: [10, 11, 12, 13],
+            source: .gmail, accountLabel: "kev@example.com"
+        )
+        XCTAssertNil(hint)
+    }
+
+    func testRegressionHintQuietWhenPriorWindowIsLow() {
+        // 0 of 0 of 0 → user is genuinely caught up; a brand-new account
+        // ramping up; etc. Don't cry wolf.
+        XCTAssertNil(CoreEngine.regressionHint(
+            currentCount: 0, priorWindow: [0, 0, 1],
+            source: .gmail, accountLabel: "kev@example.com"
+        ))
+        XCTAssertNil(CoreEngine.regressionHint(
+            currentCount: 0, priorWindow: [],
+            source: .gmail, accountLabel: "kev@example.com"
+        ))
+    }
+
+    func testRegressionHintBoundaryAtFive() {
+        // priorMax must exceed 5 — a single 6 trips it; a 5 doesn't.
+        XCTAssertNotNil(CoreEngine.regressionHint(
+            currentCount: 0, priorWindow: [0, 0, 6],
+            source: .slack, accountLabel: "team"
+        ))
+        XCTAssertNil(CoreEngine.regressionHint(
+            currentCount: 0, priorWindow: [5, 5, 5],
+            source: .slack, accountLabel: "team"
+        ))
+    }
 }

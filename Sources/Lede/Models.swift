@@ -134,29 +134,48 @@ struct SourceState: Codable, Equatable {
     /// fully drained. Surfaced in the panel footer as "N older items
     /// not shown" so vacation-returners can tell their feed is capped.
     var omittedCount: Int = 0
+    /// Rolling window of recent successful fetch counts (most recent
+    /// last, capped at 5 entries). Used to detect "source went silent"
+    /// regressions: when `lastItemCount == 0` but the window's prior
+    /// entries saw consistent activity, that's almost certainly a
+    /// scope/token problem rather than the user actually catching up.
+    var recentItemCounts: [Int] = []
+    /// Friendly hint when this source has plausibly broken (current
+    /// count is zero, prior window peak > 5). Distinct from `lastError`
+    /// which only fires on transport failures — sticky-merge keeps the
+    /// digest looking populated even when a source has silently
+    /// stopped returning items, so without this signal a real
+    /// regression stays invisible for days.
+    var regressionHint: String?
 
     init(lastFetchedAt: Date? = nil, lastItemCount: Int = 0,
-         lastError: String? = nil, omittedCount: Int = 0) {
+         lastError: String? = nil, omittedCount: Int = 0,
+         recentItemCounts: [Int] = [], regressionHint: String? = nil) {
         self.lastFetchedAt = lastFetchedAt
         self.lastItemCount = lastItemCount
         self.lastError = lastError
         self.omittedCount = omittedCount
+        self.recentItemCounts = recentItemCounts
+        self.regressionHint = regressionHint
     }
 
     private enum CodingKeys: String, CodingKey {
-        case lastFetchedAt, lastItemCount, lastError, omittedCount
+        case lastFetchedAt, lastItemCount, lastError, omittedCount,
+             recentItemCounts, regressionHint
     }
 
-    /// Hand-written decoder so state files written before pagination
-    /// landed (no `omittedCount` field) keep decoding cleanly — the
-    /// outer dictionary loader uses `try?` and would otherwise drop
-    /// every source's state on the first launch after the upgrade.
+    /// Hand-written decoder so state files written before each new
+    /// field landed keep decoding cleanly — the outer dictionary loader
+    /// uses `try?` and would otherwise drop every source's state on
+    /// the first launch after an upgrade.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.lastFetchedAt = try c.decodeIfPresent(Date.self, forKey: .lastFetchedAt)
         self.lastItemCount = try c.decodeIfPresent(Int.self, forKey: .lastItemCount) ?? 0
         self.lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
         self.omittedCount = try c.decodeIfPresent(Int.self, forKey: .omittedCount) ?? 0
+        self.recentItemCounts = try c.decodeIfPresent([Int].self, forKey: .recentItemCounts) ?? []
+        self.regressionHint = try c.decodeIfPresent(String.self, forKey: .regressionHint)
     }
 }
 

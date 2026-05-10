@@ -196,7 +196,19 @@ struct PanelView: View {
     }
 
     private func footer(_ d: Digest) -> some View {
-        VStack(spacing: 2) {
+        VStack(spacing: 3) {
+            ForEach(regressionLines, id: \.self) { line in
+                HStack(spacing: 4) {
+                    Spacer()
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.caption2)
+                    Text(line)
+                        .font(.caption2)
+                    Spacer()
+                }
+                .foregroundStyle(.orange)
+                .help("Source returned 0 items but recent fetches saw activity — likely a token or scope problem worth checking in Settings.")
+            }
             if let truncationLine {
                 HStack(spacing: 4) {
                     Spacer()
@@ -217,6 +229,15 @@ struct PanelView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    /// One line per source that's plausibly broken — current fetch
+    /// returned 0 but the rolling window has prior fetches > 5. Without
+    /// this surface, sticky-merge keeps the digest looking populated
+    /// from yesterday's items and a real source regression stays
+    /// invisible for days.
+    private var regressionLines: [String] {
+        engine.sourceStates.values.compactMap(\.regressionHint).sorted()
     }
 
     /// Sum of `omittedCount` across every fetched source. When at least one
