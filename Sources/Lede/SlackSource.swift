@@ -261,7 +261,7 @@ struct SlackSource: NotificationSource {
         let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
         let prefs = SlackPrefs(teamID: account.id)
 
-        // Two-query strategy:
+        // Three-query strategy:
         //
         //   1. `is:unread` — Slack's "give me my notifications" filter. Catches
         //      human-authored unread channel messages, DMs, and mentions.
@@ -274,10 +274,20 @@ struct SlackSource: NotificationSource {
         //      handled reminders; users who want them gone earlier can
         //      dismiss in Lede (sticks per content hash).
         //
+        //   3. `is:unread in:thread` — replies in threads the user is
+        //      following have their own unread tracking, separate from the
+        //      channel-level state `is:unread` keys off. Whether the primary
+        //      query already includes them is undocumented and varies; the
+        //      dedupe below makes this harmless when it does, and recovers
+        //      the missed replies when it doesn't. The per-fetch log line
+        //      doubles as permanent observability into how often thread
+        //      replies are the only thing we'd be returning.
+        //
         // Walk `page=` on the unread query until either the soft cap is hit
         // or the cursor is exhausted. `count=100` is Slack's per-page max.
-        // The Slackbot supplement is a single page — it's already date-
-        // bounded to recent days, so further pages would just be old noise.
+        // Both supplements are single-page — Slackbot is recency-bounded
+        // and the thread-reply count per refresh is rarely > 100; if it
+        // ever is, the log makes it visible and we can paginate later.
         let cap = SourcePagination.softCap
         var unread: [SearchResp.Match] = []
         var unreadTotal = 0
@@ -322,12 +332,28 @@ struct SlackSource: NotificationSource {
             Log.warn("slack[\(account.label)]: Slackbot supplement query failed: \(error.localizedDescription)")
         }
 
+        var threadMatches: [SearchResp.Match] = []
+        do {
+            let r = try await searchMessages(
+                query: "is:unread in:thread", count: 100, page: 1, token: token
+            )
+            // Permanent diagnostic — `total` is what `is:unread in:thread`
+            // says the workspace has right now. Compared against the
+            // unread-query total this is how we tell whether channel-level
+            // `is:unread` is silently dropping thread replies.
+            Log.info("slack[\(account.label)]: search.messages [is:unread in:thread] returned \(r.matches.count) of \(r.total) message(s)")
+            threadMatches = r.matches
+        } catch {
+            Log.warn("slack[\(account.label)]: thread supplement query failed: \(error.localizedDescription)")
+        }
+
         // Merge + dedupe by (channel.id, ts). Keep `is:unread` ordering first
-        // so a message that appears in both queries lands where the primary
-        // sort put it.
+        // so a message that appears in multiple queries lands where the
+        // primary sort put it; thread replies that the primary query missed
+        // get appended at the end.
         var seen = Set<String>()
         var matches: [SearchResp.Match] = []
-        for m in unread + slackbotMatches {
+        for m in unread + slackbotMatches + threadMatches {
             let key = "\(m.channel?.id ?? "?"):\(m.ts ?? "?")"
             if seen.insert(key).inserted { matches.append(m) }
         }
@@ -479,6 +505,8 @@ struct SlackSource: NotificationSource {
             ("from:@me",           "self-sent"),
             ("from:@slackbot",     "Slackbot-authored"),
             ("has:reminder",       "reminders"),
+            ("in:thread",          "any thread reply"),
+            ("is:unread in:thread","unread thread replies"),
         ]
         struct ProbeResp: Decodable {
             let ok: Bool
