@@ -57,7 +57,7 @@ struct GitHubSource: NotificationSource {
 
         let acct = account
         let items: [RawItem] = notifs.compactMap { n in
-            let url = n.subject.url.flatMap(htmlURL)
+            let url = Self.htmlURL(for: n)
             return RawItem(
                 id: n.id,
                 source: .github,
@@ -92,18 +92,65 @@ struct GitHubSource: NotificationSource {
         return nil
     }
 
-    /// GH notification subject URLs are API URLs. Convert to the user-facing HTML URL best-effort.
-    private func htmlURL(_ api: String) -> URL? {
-        var s = api
-        s = s.replacingOccurrences(of: "https://api.github.com/repos/", with: "https://github.com/")
-        s = s.replacingOccurrences(of: "/pulls/", with: "/pull/")
-        s = s.replacingOccurrences(of: "/commits/", with: "/commit/")
-        return URL(string: s)
+    /// Convert a GitHub notification to a user-facing URL. The
+    /// notifications API hands us an `api.github.com/repos/...` URL in
+    /// `subject.url`; for some types it maps cleanly to an HTML twin
+    /// (PullRequest, Issue, Commit, Release, Discussion, WorkflowRun)
+    /// after stripping the api host and pluralization-fixing /pulls/ and
+    /// /commits/. For other types the path has no public HTML page:
+    ///
+    ///   • CheckSuite / CheckRun: /check-suites/<id> isn't browsable.
+    ///   • Discussion: subject.url is sometimes null (discussions are
+    ///     GraphQL-only on the notifications endpoint).
+    ///
+    /// Drive the decision off `subject.type` rather than substring-checking
+    /// the rewritten URL — the previous check-for-api.github.com guard
+    /// missed paths like /check-suites/123 that survive prefix-strip but
+    /// 404 on github.com. Falls back to the repo's relevant tab so a click
+    /// always lands somewhere meaningful. Marked `static` so it's
+    /// reachable from tests.
+    static func htmlURL(for n: GHNotification) -> URL? {
+        let repoHTML = "https://github.com/\(n.repository.full_name)"
+
+        // Only attempt the api → html rewrite for types whose API URL
+        // shape maps to a public HTML page. Everything else falls
+        // through to the per-type fallback below.
+        let isRewriteable: Bool
+        switch n.subject.type {
+        case "PullRequest", "Issue", "Commit", "Release", "Discussion", "WorkflowRun":
+            isRewriteable = true
+        default:
+            isRewriteable = false
+        }
+        if isRewriteable, let api = n.subject.url, !api.isEmpty {
+            var s = api.replacingOccurrences(
+                of: "https://api.github.com/repos/", with: "https://github.com/"
+            )
+            s = s.replacingOccurrences(of: "/pulls/", with: "/pull/")
+            s = s.replacingOccurrences(of: "/commits/", with: "/commit/")
+            // Defensive: if the prefix-strip didn't fire (URL came in a
+            // shape we didn't expect for an otherwise-rewriteable type),
+            // fall through rather than ship an api.github.com link.
+            if !s.contains("api.github.com") {
+                return URL(string: s)
+            }
+        }
+
+        switch n.subject.type {
+        case "Discussion":
+            return URL(string: "\(repoHTML)/discussions")
+        case "CheckSuite", "CheckRun", "WorkflowRun":
+            return URL(string: "\(repoHTML)/actions")
+        case "Release":
+            return URL(string: "\(repoHTML)/releases")
+        default:
+            return URL(string: repoHTML)
+        }
     }
 
     // MARK: Wire types
 
-    private struct GHNotification: Decodable {
+    struct GHNotification: Decodable {
         let id: String
         let unread: Bool
         let reason: String
