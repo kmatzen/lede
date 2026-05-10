@@ -246,14 +246,30 @@ struct OutlookSource: NotificationSource {
             }
         }
 
+        // Enterprise Outlook users heavily rely on Server-side Rules to
+        // route mail to subfolders (alerting, compliance, ticket queues,
+        // project folders) — those messages skip the Inbox entirely. We
+        // used to query `/me/mailFolders/Inbox/messages` so subfolder
+        // unreads were invisible.
+        //
+        // Switch to `/me/messages` (account-wide), then exclude messages
+        // whose parent is a system folder we never want to surface
+        // (Junk, Deleted, Sent, Drafts, Outbox, sync-issues, etc.).
+        // The exclusion is built from a one-time `/me/mailFolders` lookup
+        // that returns each folder's `wellKnownName`; if that lookup
+        // fails the worst case is we surface noise from those folders
+        // until the next refresh succeeds, not a fetch failure.
+        let excludedFolderIDs = await Self.excludedParentFolderIDs(token: token)
+        let filter = Self.buildUnreadFilter(excludingParentFolderIDs: excludedFolderIDs)
+
         // First page is built locally; subsequent pages use Graph's
         // `@odata.nextLink` URL verbatim — Microsoft warns against
         // reconstructing it (skiptokens are opaque). Walk until the
         // cap is hit or there's no next link.
         let firstURL: URL = {
-            var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages")!
+            var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/messages")!
             comps.queryItems = [
-                .init(name: "$filter", value: "isRead eq false"),
+                .init(name: "$filter", value: filter),
                 .init(name: "$select", value: "id,subject,from,bodyPreview,receivedDateTime,webLink"),
                 .init(name: "$top", value: "50"),
                 .init(name: "$orderby", value: "receivedDateTime desc"),
@@ -276,7 +292,7 @@ struct OutlookSource: NotificationSource {
             let (data, resp) = try await URLSession.shared.data(for: req)
             guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
                 if let http = resp as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
-                    MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/mailFolders/Inbox/messages",
+                    MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/messages",
                                                        response: http, body: data, accessToken: token)
                 }
                 throw SourceError(source: source,
@@ -322,5 +338,63 @@ struct OutlookSource: NotificationSource {
         }
         Log.info("outlook[\(acct.label)]: returned \(items.count) message(s)\(omitted > 0 ? " (cap hit, ≥\(omitted) more)" : "")")
         return FetchResult(items: items, omitted: omitted)
+    }
+
+    /// Compose the Graph `$filter` clause for the messages query: always
+    /// `isRead eq false`, plus a `parentFolderId ne 'X'` for each
+    /// excluded folder ID. Graph filter literals are single-quoted; the
+    /// folder IDs Graph returns are base64-style (no quotes inside) so
+    /// we don't need an escape pass.
+    static func buildUnreadFilter(excludingParentFolderIDs ids: [String]) -> String {
+        var parts = ["isRead eq false"]
+        for id in ids {
+            parts.append("parentFolderId ne '\(id)'")
+        }
+        return parts.joined(separator: " and ")
+    }
+
+    /// `wellKnownName` values whose unread mail we should never surface
+    /// — system folders for sent/draft/junk/deleted/sync-issues etc. We
+    /// keep `inbox`, `archive` (auto-archive may move read mail there
+    /// but the user might intentionally archive an unread item), and
+    /// any custom user folder (those have a nil `wellKnownName`).
+    static let excludedWellKnownFolderNames: Set<String> = [
+        "sentitems", "drafts", "junkemail", "deleteditems", "outbox",
+        "conflicts", "conversationhistory", "localfailures",
+        "recoverableitemsdeletions", "scheduled", "searchfolders",
+        "serverfailures", "syncissues", "tasks", "clutter",
+    ]
+
+    /// One Graph call per fetch to discover the folder IDs whose
+    /// `wellKnownName` is in the exclusion set, so the per-message
+    /// `$filter` can drop their contents server-side. Returns an empty
+    /// array on any failure — the messages query still runs, just
+    /// without the exclusion (degraded but not broken).
+    static func excludedParentFolderIDs(token: String) async -> [String] {
+        var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders")!
+        comps.queryItems = [
+            .init(name: "$select", value: "id,wellKnownName"),
+            .init(name: "$top", value: "100"),
+        ]
+        guard let url = comps.url else { return [] }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            Log.warn("outlook: mailFolders lookup for exclusion list failed; proceeding without folder filter")
+            return []
+        }
+        struct Resp: Decodable {
+            let value: [Folder]?
+            struct Folder: Decodable {
+                let id: String
+                let wellKnownName: String?
+            }
+        }
+        guard let parsed = try? JSONDecoder().decode(Resp.self, from: data) else { return [] }
+        return (parsed.value ?? []).compactMap { f -> String? in
+            guard let name = f.wellKnownName?.lowercased() else { return nil }
+            return excludedWellKnownFolderNames.contains(name) ? f.id : nil
+        }
     }
 }
