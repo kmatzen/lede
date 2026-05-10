@@ -192,13 +192,32 @@ final class CoreEngine: ObservableObject {
         await refresh(force: false)
     }
 
-    func refresh(force: Bool) async {
+    /// Whether the user has opted into manual-Claude mode — the engine
+    /// fetches from sources but never invokes Claude until the user clicks
+    /// "Rank with Claude" in the panel. Defaults to *on*: we'd rather a new
+    /// user see their notifications without surprise API spend.
+    static var manualClaudeMode: Bool {
+        let key = "lede.manualClaudeMode"
+        if UserDefaults.standard.object(forKey: key) == nil { return true }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+
+    /// Called from the panel when the user clicks "Rank with Claude" on the
+    /// unprocessed list. Forces a refresh with manual mode disabled for this
+    /// invocation only — the user's setting is unchanged. Cached items
+    /// don't re-trigger Claude calls; only the previously-unprocessed ones do.
+    func processNow() async {
+        await refresh(force: true, manualOverride: false)
+    }
+
+    func refresh(force: Bool, manualOverride: Bool? = nil) async {
         if isRefreshing { return }
         isRefreshing = true
         lastError = nil
         defer { isRefreshing = false }
 
-        Log.info("refresh start force=\(force)")
+        let manualMode = manualOverride ?? Self.manualClaudeMode
+        Log.info("refresh start force=\(force) manual=\(manualMode)")
 
         guard let client = await anthropicClient() else {
             lastError = "No Claude credentials. Open Settings."
@@ -275,7 +294,7 @@ final class CoreEngine: ObservableObject {
             }
         )
         do {
-            let digest = try await pipeline.run(items: allItems)
+            let digest = try await pipeline.run(items: allItems, manualMode: manualMode)
             self.digest = digest
             self.lastRefreshed = Date()
             self.usage = await storage.currentUsage()

@@ -662,6 +662,7 @@ private struct AboutPane: View {
     @AppStorage("lede.quietEnabled") private var quietEnabled: Bool = false
     @AppStorage("lede.quietStartHour") private var quietStart: Int = 22
     @AppStorage("lede.quietEndHour") private var quietEnd: Int = 7
+    @AppStorage("lede.manualClaudeMode") private var manualClaude: Bool = true
 
     var body: some View {
         ScrollView {
@@ -695,6 +696,14 @@ private struct AboutPane: View {
                         } else {
                             engine.stopBackgroundRefresh()
                         }
+                    }
+
+                    Toggle("Only run Claude when I ask", isOn: $manualClaude)
+                    if manualClaude {
+                        Text("Lede will fetch your notifications but won't score them with Claude until you click \"Rank with Claude\" in the panel. Use this to keep API usage to a minimum.")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 22)
                     }
 
                     Toggle("Stay quiet during certain hours", isOn: $quietEnabled)
