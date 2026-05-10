@@ -120,6 +120,24 @@ final class CoreEngine: ObservableObject {
         accounts.isEmpty == false
     }
 
+    // MARK: Source regression detection
+
+    /// Decide whether to flag a source as plausibly regressed. Fires
+    /// only when the *current* fetch returned 0 items AND the prior
+    /// rolling window has at least one entry > 5 — i.e. "this source
+    /// used to give us things and just stopped." False positives on a
+    /// genuine "all caught up" transition are bounded: after one or
+    /// two zero-fetches, the prior window's max drops below 5 and the
+    /// hint clears itself. False positives are also acceptable here
+    /// because the worst case is one extra panel hint the user
+    /// dismisses.
+    nonisolated static func regressionHint(currentCount: Int, priorWindow: [Int],
+                                            source: Source, accountLabel: String) -> String? {
+        guard currentCount == 0 else { return nil }
+        guard let priorMax = priorWindow.max(), priorMax > 5 else { return nil }
+        return "\(source.displayName) (\(accountLabel)) returned 0 — check connection?"
+    }
+
     // MARK: Sources
 
     /// Build the per-(account, source) NotificationSource impls for everything
@@ -250,25 +268,44 @@ final class CoreEngine: ObservableObject {
             }
             for await (account, src, result) in group {
                 let key = Storage.stateKey(account: account, source: src)
+                let prior = sourceStates[key] ?? SourceState()
                 switch result {
                 case .success(let fetch):
                     Log.info("\(src.rawValue)[\(account.label)]: fetched \(fetch.items.count) item(s)\(fetch.omitted > 0 ? " (≥\(fetch.omitted) older not shown)" : "")")
                     allItems.append(contentsOf: fetch.items)
+                    var window = prior.recentItemCounts
+                    window.append(fetch.items.count)
+                    if window.count > 5 { window.removeFirst(window.count - 5) }
+                    let hint = Self.regressionHint(
+                        currentCount: fetch.items.count,
+                        priorWindow: Array(window.dropLast()),
+                        source: src,
+                        accountLabel: account.label
+                    )
+                    if hint != nil, prior.regressionHint == nil {
+                        Log.warn("\(src.rawValue)[\(account.label)]: returned 0 items but recent window peaked at \(Array(window.dropLast()).max() ?? 0) — possible source regression")
+                    }
                     let state = SourceState(
                         lastFetchedAt: Date(),
                         lastItemCount: fetch.items.count,
                         lastError: nil,
-                        omittedCount: fetch.omitted
+                        omittedCount: fetch.omitted,
+                        recentItemCounts: window,
+                        regressionHint: hint
                     )
                     await storage.setSourceState(account: account, source: src, state: state)
                     sourceStates[key] = state
                 case .failure(let err):
                     Log.error("\(src.rawValue)[\(account.label)]: fetch failed — \(err.localizedDescription)")
                     sourceErrors.append("\(account.label) · \(err.localizedDescription)")
-                    var state = sourceStates[key] ?? SourceState()
+                    var state = prior
                     state.lastError = err.localizedDescription
                     state.lastFetchedAt = Date()
                     state.omittedCount = 0
+                    // Preserve recentItemCounts and regressionHint as-is —
+                    // a transport failure is its own signal (lastError);
+                    // overwriting the regression window with a non-data
+                    // event would dilute its meaning.
                     await storage.setSourceState(account: account, source: src, state: state)
                     sourceStates[key] = state
                 }
