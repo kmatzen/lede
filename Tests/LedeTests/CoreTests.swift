@@ -229,4 +229,43 @@ final class CoreTests: XCTestCase {
             d.removeObject(forKey: "lede.slack.\(team).\(k)")
         }
     }
+
+    // MARK: GitHub Link header parsing
+
+    func testGitHubParseNextLinkPicksRelNext() {
+        let header = "<https://api.github.com/notifications?page=2>; rel=\"next\", <https://api.github.com/notifications?page=5>; rel=\"last\""
+        let next = GitHubSource.parseNextLink(header)
+        XCTAssertEqual(next?.absoluteString, "https://api.github.com/notifications?page=2")
+    }
+
+    func testGitHubParseNextLinkAbsentOnLastPage() {
+        let header = "<https://api.github.com/notifications?page=1>; rel=\"prev\", <https://api.github.com/notifications?page=1>; rel=\"first\""
+        XCTAssertNil(GitHubSource.parseNextLink(header))
+    }
+
+    func testGitHubParseNextLinkEmptyHeader() {
+        XCTAssertNil(GitHubSource.parseNextLink(""))
+    }
+
+    // MARK: SourceState codable
+
+    func testSourceStateDecodesLegacyJSONWithoutOmittedCount() throws {
+        // State files written before pagination landed don't have the
+        // `omittedCount` key. Decoding must default it to 0 so we don't
+        // wipe every source's health snapshot on first launch after upgrade.
+        let json = #"{"lastFetchedAt":"2026-05-10T00:00:00Z","lastItemCount":17}"#
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        let s = try dec.decode(SourceState.self, from: Data(json.utf8))
+        XCTAssertEqual(s.lastItemCount, 17)
+        XCTAssertEqual(s.omittedCount, 0)
+        XCTAssertNil(s.lastError)
+    }
+
+    func testSourceStateDecodesNewJSONWithOmittedCount() throws {
+        let json = #"{"lastItemCount":200,"omittedCount":42}"#
+        let s = try JSONDecoder().decode(SourceState.self, from: Data(json.utf8))
+        XCTAssertEqual(s.lastItemCount, 200)
+        XCTAssertEqual(s.omittedCount, 42)
+    }
 }

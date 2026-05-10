@@ -241,7 +241,7 @@ final class CoreEngine: ObservableObject {
         // Fetch all (account, source) pairs in parallel; ignore individual failures.
         var allItems: [RawItem] = []
         var sourceErrors: [String] = []
-        await withTaskGroup(of: (Account, Source, Result<[RawItem], Error>).self) { group in
+        await withTaskGroup(of: (Account, Source, Result<FetchResult, Error>).self) { group in
             for s in sources {
                 group.addTask {
                     do { return (s.account, s.source, .success(try await s.fetch())) }
@@ -251,10 +251,15 @@ final class CoreEngine: ObservableObject {
             for await (account, src, result) in group {
                 let key = Storage.stateKey(account: account, source: src)
                 switch result {
-                case .success(let items):
-                    Log.info("\(src.rawValue)[\(account.label)]: fetched \(items.count) item(s)")
-                    allItems.append(contentsOf: items)
-                    let state = SourceState(lastFetchedAt: Date(), lastItemCount: items.count, lastError: nil)
+                case .success(let fetch):
+                    Log.info("\(src.rawValue)[\(account.label)]: fetched \(fetch.items.count) item(s)\(fetch.omitted > 0 ? " (≥\(fetch.omitted) older not shown)" : "")")
+                    allItems.append(contentsOf: fetch.items)
+                    let state = SourceState(
+                        lastFetchedAt: Date(),
+                        lastItemCount: fetch.items.count,
+                        lastError: nil,
+                        omittedCount: fetch.omitted
+                    )
                     await storage.setSourceState(account: account, source: src, state: state)
                     sourceStates[key] = state
                 case .failure(let err):
@@ -263,6 +268,7 @@ final class CoreEngine: ObservableObject {
                     var state = sourceStates[key] ?? SourceState()
                     state.lastError = err.localizedDescription
                     state.lastFetchedAt = Date()
+                    state.omittedCount = 0
                     await storage.setSourceState(account: account, source: src, state: state)
                     sourceStates[key] = state
                 }

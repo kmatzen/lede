@@ -196,12 +196,40 @@ struct PanelView: View {
     }
 
     private func footer(_ d: Digest) -> some View {
-        HStack {
-            Spacer()
-            Text("Updated \(d.generatedAt, style: .relative) ago")
-                .font(.caption2).foregroundStyle(.tertiary)
-            Spacer()
-        }.padding(.top, 4)
+        VStack(spacing: 2) {
+            if let truncationLine {
+                HStack(spacing: 4) {
+                    Spacer()
+                    Image(systemName: "ellipsis.circle")
+                        .font(.caption2)
+                    Text(truncationLine)
+                        .font(.caption2)
+                    Spacer()
+                }
+                .foregroundStyle(.tertiary)
+                .help("Each source caps how many older unread items it pulls per refresh; older items remain in the original inbox.")
+            }
+            HStack {
+                Spacer()
+                Text("Updated \(d.generatedAt, style: .relative) ago")
+                    .font(.caption2).foregroundStyle(.tertiary)
+                Spacer()
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    /// Sum of `omittedCount` across every fetched source. When at least one
+    /// source's fetch ran into the soft cap, the user sees a "N older items
+    /// not shown" hint. The count may be a lower bound — sources that only
+    /// expose a next-page cursor (Gmail, GitHub, Outlook) report `≥1` —
+    /// so the rendering uses "+" to convey "at least this many" rather
+    /// than implying an exact count.
+    private var truncationLine: String? {
+        let total = engine.sourceStates.values.reduce(0) { $0 + $1.omittedCount }
+        guard total > 0 else { return nil }
+        if total == 1 { return "More older items not shown" }
+        return "\(total)+ older items not shown"
     }
 
     private func centered<V: View>(@ViewBuilder _ view: () -> V) -> some View {

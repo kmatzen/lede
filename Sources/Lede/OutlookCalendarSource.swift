@@ -11,8 +11,10 @@ struct OutlookCalendarSource: NotificationSource {
         Keychain.get(Keychain.Key.microsoftRefresh(account.id)) != nil
     }
 
-    func fetch() async throws -> [RawItem] {
-        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else { return [] }
+    func fetch() async throws -> FetchResult {
+        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else {
+            return FetchResult(items: [])
+        }
 
         let now = Date()
         let in24h = now.addingTimeInterval(24 * 3600)
@@ -64,7 +66,7 @@ struct OutlookCalendarSource: NotificationSource {
         let parsed = try decoder.decode(ListResp.self, from: data)
         let acct = account
 
-        return parsed.value.compactMap { ev in
+        let items: [RawItem] = parsed.value.compactMap { ev in
             if ev.isCancelled == true { return nil }
             guard let subject = ev.subject, !subject.isEmpty else { return nil }
             guard let startStr = ev.start?.dateTime else { return nil }
@@ -100,6 +102,7 @@ struct OutlookCalendarSource: NotificationSource {
                 isUnread: needsResponse
             )
         }
+        return FetchResult(items: items)
     }
 
     private func parseGraphDate(_ s: String) -> Date? {

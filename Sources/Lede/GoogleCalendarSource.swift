@@ -11,8 +11,10 @@ struct GoogleCalendarSource: NotificationSource {
         Keychain.get(Keychain.Key.googleRefresh(account.id)) != nil
     }
 
-    func fetch() async throws -> [RawItem] {
-        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else { return [] }
+    func fetch() async throws -> FetchResult {
+        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else {
+            return FetchResult(items: [])
+        }
 
         let now = Date()
         let in24h = now.addingTimeInterval(24 * 3600)
@@ -101,7 +103,7 @@ struct GoogleCalendarSource: NotificationSource {
                 isUnread: needsResponse
             )
         }
-        return items
+        return FetchResult(items: items)
     }
 
     private func parseStart(dateTime: String?, date: String?) -> Date? {
