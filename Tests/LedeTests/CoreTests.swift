@@ -54,6 +54,33 @@ final class CoreTests: XCTestCase {
         XCTAssertNotEqual(a.contentHash, b.contentHash)
     }
 
+    // MARK: Gmail skip labels
+
+    func testGmailSkipLabelsCoversSystemNoise() {
+        // SPAM/TRASH are the original gates; SENT/DRAFT/CHAT got added
+        // when we dropped the INBOX filter (so the user's own outgoing
+        // mail / legacy Hangouts scrollback can't sneak in via UNREAD).
+        let s = GmailSource.skipLabels
+        XCTAssertTrue(s.contains("SPAM"))
+        XCTAssertTrue(s.contains("TRASH"))
+        XCTAssertTrue(s.contains("SENT"))
+        XCTAssertTrue(s.contains("DRAFT"))
+        XCTAssertTrue(s.contains("CHAT"))
+    }
+
+    func testGmailSkipLabelsDoesNotFilterCategoriesOrCustomLabels() {
+        // CATEGORY_* mis-categorizes too aggressively (UPDATES catches
+        // billing notices, security alerts, calendar invites) and
+        // user-defined labels are exactly the auto-archived signal we
+        // now want to surface — neither should appear in the skip set.
+        let s = GmailSource.skipLabels
+        XCTAssertFalse(s.contains("CATEGORY_PROMOTIONS"))
+        XCTAssertFalse(s.contains("CATEGORY_UPDATES"))
+        XCTAssertFalse(s.contains("CATEGORY_SOCIAL"))
+        XCTAssertFalse(s.contains("INBOX"))
+        XCTAssertFalse(s.contains("UNREAD"))
+    }
+
     // MARK: From-header parsing
 
     func testParseFromHeaderDisplayName() {

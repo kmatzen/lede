@@ -173,15 +173,36 @@ struct GmailSource: NotificationSource {
         Keychain.get(Keychain.Key.googleRefresh(account.id)) != nil
     }
 
+    /// System labels that disqualify a message from the digest. SPAM/TRASH
+    /// are obvious; SENT/DRAFT/CHAT keep the user's own outgoing mail and
+    /// legacy Hangouts scrollback out — relevant now that we query UNREAD
+    /// alone (no INBOX gate), since drafts especially can carry UNREAD.
+    static let skipLabels: Set<String> = ["SPAM", "TRASH", "SENT", "DRAFT", "CHAT"]
+
     func fetch() async throws -> FetchResult {
         guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else {
             return FetchResult(items: [])
         }
 
         // `gmail.metadata` scope forbids the `q` search param (Google: "query
-        // text could expose body content"). So we filter by labelIds here —
-        // INBOX ∧ UNREAD — and drop the category-labeled stuff client-side
-        // once we have each message's labelIds.
+        // text could expose body content"). We filter by labelIds and finish
+        // any remaining filtering client-side once we have each message's
+        // labelIds.
+        //
+        // Use UNREAD alone — *not* INBOX ∧ UNREAD. Power users routinely set
+        // up filters that auto-archive (skip the inbox) and apply a custom
+        // label: CI alerts → Label/CI, security alerts → Label/Security,
+        // PagerDuty → Label/Oncall, calendar invites → Label/Calendar.
+        // Filtering by INBOX dropped exactly those — the highest-signal
+        // automated mail the user has already invested in triaging. Volume
+        // risk (large UNREAD backlog from old auto-archived mail) is
+        // bounded by the per-source soft cap and by manual-Claude mode
+        // (default on) which doesn't call Claude until the user asks.
+        //
+        // System labels we DO drop client-side below: SPAM/TRASH (junk by
+        // definition), SENT/DRAFT (the user's own outgoing mail —
+        // shouldn't appear in their notifications digest), and the
+        // legacy CHAT label (defunct Hangouts).
         //
         // Walk `nextPageToken` until we hit the soft cap or the cursor is
         // exhausted. `maxResults` per page is 100 (Gmail's default ceiling
@@ -199,7 +220,6 @@ struct GmailSource: NotificationSource {
         repeat {
             var listURL = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
             var items: [URLQueryItem] = [
-                .init(name: "labelIds", value: "INBOX"),
                 .init(name: "labelIds", value: "UNREAD"),
                 .init(name: "maxResults", value: "100"),
             ]
@@ -321,8 +341,12 @@ struct GmailSource: NotificationSource {
         // resets, and calendar invites. Letting them through and trusting
         // the triage prompt to score promotional noise low loses fewer real
         // notifications.
+        //
+        // SENT / DRAFT / CHAT are added because we now query by UNREAD only
+        // (no INBOX gate), and those system labels can carry UNREAD in
+        // edge cases (drafts especially) — the user doesn't want their
+        // own outgoing mail or chat scrollback surfaced as a notification.
         let labels = Set(m.labelIds ?? [])
-        let skipLabels: Set<String> = ["SPAM", "TRASH"]
         if !labels.isDisjoint(with: skipLabels) { return .filtered }
 
         let headers = Dictionary(uniqueKeysWithValues: (m.payload?.headers ?? []).map { ($0.name.lowercased(), $0.value) })
