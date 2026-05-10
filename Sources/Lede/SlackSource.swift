@@ -207,77 +207,110 @@ struct SlackSource: NotificationSource {
         Keychain.get(Keychain.Key.slackAccess(account.id)) != nil
     }
 
+    fileprivate struct SearchResp: Decodable {
+        let ok: Bool
+        let error: String?
+        /// Slack returns `needed` and `provided` scopes when search:read
+        /// is missing — surface that into our error message rather than
+        /// the generic "missing_scope".
+        let needed: String?
+        let provided: String?
+        /// Non-fatal warnings — e.g. `superfluous_charset` or scope
+        /// hints — surfaced in the log when no matches come back so
+        /// we can tell "Slack is happy but the index is empty" from
+        /// "Slack quietly downgraded the query".
+        let warning: String?
+        let response_metadata: ResponseMeta?
+        let messages: Messages?
+        struct ResponseMeta: Decodable {
+            let warnings: [String]?
+            let messages: [String]?
+        }
+        struct Messages: Decodable {
+            let matches: [Match]?
+            let total: Int?
+        }
+        struct Match: Decodable {
+            let channel: Channel?
+            let user: String?
+            let username: String?
+            let text: String?
+            let ts: String?
+            let permalink: String?
+            struct Channel: Decodable {
+                let id: String
+                let name: String?
+                let is_im: Bool?
+                let is_mpim: Bool?
+                let is_private: Bool?
+            }
+        }
+    }
+
     func fetch() async throws -> [RawItem] {
         guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return [] }
         let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
         let prefs = SlackPrefs(teamID: account.id)
 
-        // Single search.messages call with `is:unread` — Slack's effective
-        // "give me my notifications" endpoint. Replaces ~600 lines of
-        // conversations.info per-channel probing, starred-cache discovery,
-        // priority sorting, rate-limit pacing, and budget bookkeeping that
-        // never actually surfaced channel/MPIM unreads on real workspaces.
-        var comps = URLComponents(string: "https://slack.com/api/search.messages")!
-        comps.queryItems = [
-            .init(name: "query", value: "is:unread"),
-            .init(name: "count", value: "100"),
-            .init(name: "sort", value: "timestamp"),
-            .init(name: "sort_dir", value: "desc"),
-        ]
-        let (data, resp) = try await Self.slackGet(comps.url!, token: token)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw SourceError(source: .slack,
-                              message: "search.messages HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0): \(body.prefix(200))")
+        // Two-query strategy:
+        //
+        //   1. `is:unread` — Slack's "give me my notifications" filter. Catches
+        //      human-authored unread channel messages, DMs, and mentions.
+        //
+        //   2. `from:@slackbot after:<recent>` — `is:unread` silently excludes
+        //      Slackbot-authored messages even when they're genuinely unread,
+        //      so reminders fired via /remind never appear via query #1. We
+        //      pull recent Slackbot messages separately and dedupe by ts.
+        //      The recency window keeps us from dredging up old, already-
+        //      handled reminders; users who want them gone earlier can
+        //      dismiss in Lede (sticks per content hash).
+        let (unread, unreadTotal, http, parsed) = try await searchMessages(
+            query: "is:unread", count: 100, token: token
+        )
+        Log.info("slack[\(account.label)]: search.messages [is:unread] returned \(unread.count) of \(unreadTotal) message(s)")
+
+        let after = Self.afterDateString(daysBack: 2)
+        var slackbotMatches: [SearchResp.Match] = []
+        do {
+            let (m, total, _, _) = try await searchMessages(
+                query: "from:@slackbot after:\(after)", count: 20, token: token
+            )
+            Log.info("slack[\(account.label)]: search.messages [from:@slackbot after:\(after)] returned \(m.count) of \(total) message(s)")
+            slackbotMatches = m
+        } catch {
+            // Don't fail the whole fetch over a supplementary query.
+            Log.warn("slack[\(account.label)]: Slackbot supplement query failed: \(error.localizedDescription)")
         }
 
-        struct SearchResp: Decodable {
-            let ok: Bool
-            let error: String?
-            /// Slack returns `needed` and `provided` scopes when search:read
-            /// is missing — surface that into our error message rather than
-            /// the generic "missing_scope".
-            let needed: String?
-            let provided: String?
-            let messages: Messages?
-            struct Messages: Decodable {
-                let matches: [Match]?
-                let total: Int?
+        // Merge + dedupe by (channel.id, ts). Keep `is:unread` ordering first
+        // so a message that appears in both queries lands where the primary
+        // sort put it.
+        var seen = Set<String>()
+        var matches: [SearchResp.Match] = []
+        for m in unread + slackbotMatches {
+            let key = "\(m.channel?.id ?? "?"):\(m.ts ?? "?")"
+            if seen.insert(key).inserted { matches.append(m) }
+        }
+
+        // Diagnostic: when both queries combined return zero, dump the
+        // response headers + any warnings, then run the multi-query probe.
+        // Useful for figuring out why a known-unread message doesn't appear
+        // (often search indexing lag, sometimes a missing scope Slack
+        // downgraded silently).
+        if matches.isEmpty {
+            let scopes = http.value(forHTTPHeaderField: "X-OAuth-Scopes") ?? "?"
+            let acceptedScopes = http.value(forHTTPHeaderField: "X-Accepted-OAuth-Scopes") ?? "?"
+            var bits: [String] = ["scopes=\(scopes)", "accepted=\(acceptedScopes)"]
+            if let w = parsed.warning { bits.append("warning=\(w)") }
+            if let ws = parsed.response_metadata?.warnings, !ws.isEmpty {
+                bits.append("metaWarnings=\(ws.joined(separator: "|"))")
             }
-            struct Match: Decodable {
-                let channel: Channel?
-                let user: String?
-                let username: String?
-                let text: String?
-                let ts: String?
-                let permalink: String?
-                struct Channel: Decodable {
-                    let id: String
-                    let name: String?
-                    let is_im: Bool?
-                    let is_mpim: Bool?
-                    let is_private: Bool?
-                }
+            if let ms = parsed.response_metadata?.messages, !ms.isEmpty {
+                bits.append("metaMessages=\(ms.joined(separator: "|"))")
             }
+            Log.info("slack[\(account.label)]: zero-results diagnostics — \(bits.joined(separator: " "))")
+            await probeSearchIndex(token: token, label: account.label)
         }
-
-        let parsed: SearchResp
-        do { parsed = try JSONDecoder().decode(SearchResp.self, from: data) }
-        catch {
-            // Log raw body for the first few characters so we can see what
-            // Slack actually returned when decode fails.
-            let raw = String(data: data, encoding: .utf8) ?? ""
-            Log.warn("slack[\(account.label)] search.messages decode failed: \(raw.prefix(400))")
-            throw SourceError(source: .slack, message: "search.messages decode: \(error.localizedDescription)")
-        }
-        guard parsed.ok else {
-            let detail = parsed.needed.map { "needed=\($0) provided=\(parsed.provided ?? "?")" } ?? ""
-            throw SourceError(source: .slack,
-                              message: "search.messages: \(parsed.error ?? "unknown") \(detail)")
-        }
-
-        let matches = parsed.messages?.matches ?? []
-        Log.info("slack[\(account.label)]: search.messages returned \(matches.count) of \(parsed.messages?.total ?? 0) unread message(s)")
 
         // Resolve @mentions and DM partner names.
         let users = await Self.userNameCache(token: token)
@@ -335,6 +368,99 @@ struct SlackSource: NotificationSource {
                 receivedAt: received,
                 isUnread: true
             )
+        }
+    }
+
+    /// One `search.messages` call. Returns the matches, the API-reported
+    /// total, the raw HTTP response (so callers can inspect headers like
+    /// `X-OAuth-Scopes`), and the parsed envelope (for warnings / metadata).
+    /// Throws on transport, decode, or `ok=false` errors.
+    private func searchMessages(query: String, count: Int, token: String)
+        async throws -> (matches: [SearchResp.Match], total: Int, http: HTTPURLResponse, parsed: SearchResp)
+    {
+        var comps = URLComponents(string: "https://slack.com/api/search.messages")!
+        comps.queryItems = [
+            .init(name: "query", value: query),
+            .init(name: "count", value: String(count)),
+            .init(name: "sort", value: "timestamp"),
+            .init(name: "sort_dir", value: "desc"),
+        ]
+        let (data, resp) = try await Self.slackGet(comps.url!, token: token)
+        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw SourceError(source: .slack,
+                              message: "search.messages HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0): \(body.prefix(200))")
+        }
+        let parsed: SearchResp
+        do { parsed = try JSONDecoder().decode(SearchResp.self, from: data) }
+        catch {
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            Log.warn("slack[\(account.label)] search.messages decode failed: \(raw.prefix(400))")
+            throw SourceError(source: .slack, message: "search.messages decode: \(error.localizedDescription)")
+        }
+        guard parsed.ok else {
+            let detail = parsed.needed.map { "needed=\($0) provided=\(parsed.provided ?? "?")" } ?? ""
+            throw SourceError(source: .slack,
+                              message: "search.messages [\(query)]: \(parsed.error ?? "unknown") \(detail)")
+        }
+        return (parsed.messages?.matches ?? [], parsed.messages?.total ?? 0, http, parsed)
+    }
+
+    /// `YYYY-MM-DD` `daysBack` days before today (UTC). Used as the
+    /// `after:` modifier on the Slackbot supplement query. Slack's `after:`
+    /// is exclusive, so this returns messages from the day after the
+    /// formatted date onward — close enough to "last N days" for a coarse
+    /// recency filter.
+    private static func afterDateString(daysBack: Int) -> String {
+        let date = Calendar.current.date(byAdding: .day, value: -daysBack, to: Date()) ?? Date()
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.string(from: date)
+    }
+
+    /// Diagnostic: probe `search.messages` with several query shapes to
+    /// figure out *why* `is:unread` came back empty. We want to distinguish:
+    ///
+    ///   • search index is empty (workspace freshly created, indexing not
+    ///     yet caught up) — every probe returns 0
+    ///   • `is:unread` is over-filtering — `from:@me` / `from:@slackbot`
+    ///     return >0, but `is:unread` returns 0
+    ///   • Slackbot/system messages are excluded by `is:unread` — generic
+    ///     queries return >0 but `from:@slackbot` returns 0
+    ///
+    /// All counts are logged together so the user can see the full picture.
+    private func probeSearchIndex(token: String, label: String) async {
+        let probes: [(String, String)] = [
+            ("the",                "common word"),
+            ("a",                  "single-letter"),
+            ("from:@me",           "self-sent"),
+            ("from:@slackbot",     "Slackbot-authored"),
+            ("has:reminder",       "reminders"),
+        ]
+        struct ProbeResp: Decodable {
+            let ok: Bool
+            let error: String?
+            let messages: M?
+            struct M: Decodable { let total: Int? }
+        }
+        for (q, descr) in probes {
+            var comps = URLComponents(string: "https://slack.com/api/search.messages")!
+            comps.queryItems = [
+                .init(name: "query", value: q),
+                .init(name: "count", value: "1"),
+            ]
+            guard let url = comps.url,
+                  let (data, _) = try? await Self.slackGet(url, token: token),
+                  let parsed = try? JSONDecoder().decode(ProbeResp.self, from: data) else {
+                Log.info("slack[\(label)]: probe `\(q)` (\(descr)) HTTP/decode failed")
+                continue
+            }
+            if parsed.ok {
+                Log.info("slack[\(label)]: probe `\(q)` (\(descr)) → \(parsed.messages?.total ?? 0) match(es)")
+            } else {
+                Log.info("slack[\(label)]: probe `\(q)` (\(descr)) → error=\(parsed.error ?? "?")")
+            }
         }
     }
 
