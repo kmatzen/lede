@@ -342,6 +342,35 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(chosen.first?.primary, true)
     }
 
+    // MARK: Outlook unread filter
+
+    func testOutlookFilterBareWhenNoExclusions() {
+        XCTAssertEqual(
+            OutlookSource.buildUnreadFilter(excludingParentFolderIDs: []),
+            "isRead eq false"
+        )
+    }
+
+    func testOutlookFilterAppendsParentFolderExclusions() {
+        let f = OutlookSource.buildUnreadFilter(excludingParentFolderIDs: ["AAA", "BBB"])
+        // Order is preserved; each id is single-quoted; clauses ANDed.
+        XCTAssertEqual(
+            f,
+            "isRead eq false and parentFolderId ne 'AAA' and parentFolderId ne 'BBB'"
+        )
+    }
+
+    func testOutlookExcludedWellKnownNamesCoversSystemFolders() {
+        // Sanity: the names we route to the exclusion-set must cover the
+        // folders that would flood the digest if we kept them. If anyone
+        // edits the set, the most-impactful four had better still be in it.
+        let s = OutlookSource.excludedWellKnownFolderNames
+        XCTAssertTrue(s.contains("junkemail"))
+        XCTAssertTrue(s.contains("deleteditems"))
+        XCTAssertTrue(s.contains("sentitems"))
+        XCTAssertTrue(s.contains("drafts"))
+    }
+
     // MARK: GitHub Link header parsing
 
     func testGitHubParseNextLinkPicksRelNext() {
