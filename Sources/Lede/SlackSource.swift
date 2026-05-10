@@ -261,27 +261,34 @@ struct SlackSource: NotificationSource {
         let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
         let prefs = SlackPrefs(teamID: account.id)
 
-        // Three-query strategy:
+        // Strategy: 3 search.messages queries + 1 conversations-API
+        // fallback. The search-based queries are cheap and serve the
+        // common case; the conversations API is the safety net for what
+        // search-by-content silently drops (notably bot integrations).
         //
-        //   1. `is:unread` — Slack's "give me my notifications" filter. Catches
-        //      human-authored unread channel messages, DMs, and mentions.
+        //   1. `is:unread` — Slack's "give me my notifications" filter.
+        //      Catches human-authored unread channel messages, DMs, and
+        //      mentions.
         //
-        //   2. `from:@slackbot after:<recent>` — `is:unread` silently excludes
-        //      Slackbot-authored messages even when they're genuinely unread,
-        //      so reminders fired via /remind never appear via query #1. We
-        //      pull recent Slackbot messages separately and dedupe by ts.
-        //      The recency window keeps us from dredging up old, already-
-        //      handled reminders; users who want them gone earlier can
-        //      dismiss in Lede (sticks per content hash).
+        //   2. `from:@slackbot after:<recent>` — `is:unread` silently
+        //      excludes Slackbot-authored messages even when they're
+        //      genuinely unread, so reminders fired via /remind never
+        //      appear via query #1. We pull recent Slackbot messages
+        //      separately and dedupe by ts. The recency window keeps us
+        //      from dredging up old, already-handled reminders.
         //
         //   3. `is:unread in:thread` — replies in threads the user is
         //      following have their own unread tracking, separate from the
-        //      channel-level state `is:unread` keys off. Whether the primary
-        //      query already includes them is undocumented and varies; the
-        //      dedupe below makes this harmless when it does, and recovers
-        //      the missed replies when it doesn't. The per-fetch log line
-        //      doubles as permanent observability into how often thread
-        //      replies are the only thing we'd be returning.
+        //      channel-level state `is:unread` keys off. The per-fetch log
+        //      line doubles as permanent observability into how often
+        //      thread replies are the only thing we'd be returning.
+        //
+        //   4. Conversations API (users.conversations + conversations.info
+        //      + conversations.history) — read-state-based, so it catches
+        //      whatever Slack itself considers unread regardless of who
+        //      authored it. Closes the bot-integration gap (PagerDuty,
+        //      Datadog, Jira, custom webhooks) that no `from:` search
+        //      query can enumerate without an adhoc allowlist.
         //
         // Walk `page=` on the unread query until either the soft cap is hit
         // or the cursor is exhausted. `count=100` is Slack's per-page max.
@@ -347,13 +354,15 @@ struct SlackSource: NotificationSource {
             Log.warn("slack[\(account.label)]: thread supplement query failed: \(error.localizedDescription)")
         }
 
-        // Merge + dedupe by (channel.id, ts). Keep `is:unread` ordering first
-        // so a message that appears in multiple queries lands where the
-        // primary sort put it; thread replies that the primary query missed
-        // get appended at the end.
+        // Conversations-API fallback: the bot-integration safety net.
+        let conversationsMatches = await fetchConversationsAPIUnreads(prefs: prefs, token: token)
+
+        // Merge + dedupe by (channel.id, ts). Keep `is:unread` ordering
+        // first so messages also returned by other paths land where the
+        // primary sort put them; supplements append the rest.
         var seen = Set<String>()
         var matches: [SearchResp.Match] = []
-        for m in unread + slackbotMatches + threadMatches {
+        for m in unread + slackbotMatches + threadMatches + conversationsMatches {
             let key = "\(m.channel?.id ?? "?"):\(m.ts ?? "?")"
             if seen.insert(key).inserted { matches.append(m) }
         }
@@ -571,6 +580,308 @@ struct SlackSource: NotificationSource {
         return all
     }
 
+    /// Orchestrates the conversations-API fallback path. Discovers
+    /// channels with unread state, expands them to their unread
+    /// messages, and returns Match-shaped values for the existing
+    /// dedupe + render path. Best-effort throughout — any failure
+    /// here is a missed bot alert, not a fetch-killing error, so we
+    /// log and keep going rather than throw.
+    private func fetchConversationsAPIUnreads(prefs: SlackPrefs, token: String)
+        async -> [SearchResp.Match]
+    {
+        async let domainTask: String? = Self.teamDomain(token: token)
+
+        let conversations = await Self.userConversations(token: token)
+        let candidates = Self.conversationCandidates(conversations, prefs: prefs)
+        let probed = Array(candidates.prefix(Self.conversationsInfoCap))
+        let unreadStatuses = await Self.unreadChannelStatuses(
+            candidates: probed, token: token, cap: 8
+        )
+        let toFetch = Array(unreadStatuses.prefix(Self.conversationsHistoryCap))
+        let domain = await domainTask
+        Log.info("slack[\(account.label)]: conversations-API probed \(probed.count)/\(candidates.count) channel(s), \(unreadStatuses.count) unread, fetching history for \(toFetch.count)")
+
+        var matches: [SearchResp.Match] = []
+        await withTaskGroup(of: [SearchResp.Match].self) { group in
+            var next = 0
+            let cap = 4
+            for (conv, lastRead) in toFetch.prefix(cap) {
+                group.addTask {
+                    let msgs = await Self.conversationHistory(
+                        channelID: conv.id, oldest: lastRead, token: token
+                    )
+                    return Self.matches(from: msgs, in: conv, domain: domain)
+                }
+                next += 1
+            }
+            while let result = await group.next() {
+                if next < toFetch.count {
+                    let (conv, lastRead) = toFetch[next]
+                    group.addTask {
+                        let msgs = await Self.conversationHistory(
+                            channelID: conv.id, oldest: lastRead, token: token
+                        )
+                        return Self.matches(from: msgs, in: conv, domain: domain)
+                    }
+                    next += 1
+                }
+                matches.append(contentsOf: result)
+            }
+        }
+        if !matches.isEmpty {
+            Log.info("slack[\(account.label)]: conversations-API fallback returned \(matches.count) message(s)")
+        }
+        return matches
+    }
+
+    // MARK: - Conversations API fallback (for bot-authored unreads)
+
+    /// search.messages?is:unread is content-indexed; bot/app-authored
+    /// messages (PagerDuty, Datadog, Jira, etc.) are silently excluded
+    /// even when they're genuinely unread. The conversations API is
+    /// read-state-based — `last_read` and `unread_count_display` per
+    /// channel — so it catches whatever Slack itself considers unread,
+    /// regardless of who authored it. We fan out:
+    ///
+    ///   1. users.conversations  → channels the user is in
+    ///   2. conversations.info   → last_read + unread_count per channel
+    ///   3. conversations.history → unread messages from channels with
+    ///      unread_count > 0
+    ///
+    /// Cost: 1-3 (list) + N (info, capped 100) + M (history, capped 30)
+    /// + 1 (team.info for permalink construction). Tiers 4 / 3 absorb
+    /// it. Channel-level prefs (deny/allow/include flags) are applied
+    /// pre-info so we don't pay for channels we'd filter out anyway.
+    fileprivate struct Conversation: Decodable {
+        let id: String
+        let name: String?
+        let is_im: Bool?
+        let is_mpim: Bool?
+        let is_private: Bool?
+        let is_archived: Bool?
+        let is_member: Bool?
+        let user: String?  // partner user id, set on IMs
+    }
+
+    fileprivate struct ConversationInfoChannel: Decodable {
+        let last_read: String?
+        let unread_count_display: Int?
+    }
+
+    fileprivate struct HistoryMessage: Decodable {
+        let ts: String?
+        let user: String?
+        let bot_id: String?
+        let username: String?
+        let text: String?
+        let subtype: String?
+    }
+
+    /// Maximum candidate channels to probe per fetch via conversations.info.
+    /// Sized so even at 100 (cap) calls we stay under Tier 4's 100/min budget
+    /// for a single fetch. Heavy-channel users may not see every channel
+    /// every refresh, but is:unread already covers the human-authored case.
+    fileprivate static let conversationsInfoCap = 100
+    /// Maximum unread channels we'll expand to history per fetch. Bounded
+    /// independently so a workspace where every channel has unread bot
+    /// chatter doesn't blow the Tier 3 budget (50/min).
+    fileprivate static let conversationsHistoryCap = 30
+    /// Per-channel history page size. 20 is enough to catch bursty alert
+    /// streams (PagerDuty fires multiple in rapid succession) without
+    /// dredging up old chatter when last_read is recent.
+    fileprivate static let conversationsHistoryLimit = 20
+
+    fileprivate static func userConversations(token: String) async -> [Conversation] {
+        var all: [Conversation] = []
+        var cursor: String? = nil
+        repeat {
+            var comps = URLComponents(string: "https://slack.com/api/users.conversations")!
+            var items: [URLQueryItem] = [
+                .init(name: "limit", value: "200"),
+                .init(name: "exclude_archived", value: "true"),
+                .init(name: "types", value: "public_channel,private_channel,mpim,im"),
+            ]
+            if let c = cursor { items.append(.init(name: "cursor", value: c)) }
+            comps.queryItems = items
+            guard let url = comps.url,
+                  let (data, _) = try? await slackGet(url, token: token) else { return all }
+            struct Resp: Decodable {
+                let ok: Bool
+                let channels: [Conversation]?
+                let response_metadata: Meta?
+                struct Meta: Decodable { let next_cursor: String? }
+            }
+            guard let parsed = try? JSONDecoder().decode(Resp.self, from: data), parsed.ok else { return all }
+            all.append(contentsOf: parsed.channels ?? [])
+            let next = parsed.response_metadata?.next_cursor ?? ""
+            cursor = next.isEmpty ? nil : next
+        } while cursor != nil && all.count < 1000
+        return all
+    }
+
+    fileprivate static func conversationInfo(channelID: String, token: String)
+        async -> ConversationInfoChannel?
+    {
+        var comps = URLComponents(string: "https://slack.com/api/conversations.info")!
+        comps.queryItems = [
+            .init(name: "channel", value: channelID),
+            .init(name: "include_locale", value: "false"),
+        ]
+        guard let url = comps.url,
+              let (data, _) = try? await slackGet(url, token: token) else { return nil }
+        struct Resp: Decodable {
+            let ok: Bool
+            let channel: ConversationInfoChannel?
+        }
+        guard let parsed = try? JSONDecoder().decode(Resp.self, from: data), parsed.ok else { return nil }
+        return parsed.channel
+    }
+
+    fileprivate static func conversationHistory(channelID: String, oldest: String, token: String)
+        async -> [HistoryMessage]
+    {
+        var comps = URLComponents(string: "https://slack.com/api/conversations.history")!
+        comps.queryItems = [
+            .init(name: "channel", value: channelID),
+            .init(name: "oldest", value: oldest),
+            .init(name: "limit", value: String(conversationsHistoryLimit)),
+            .init(name: "inclusive", value: "false"),
+        ]
+        guard let url = comps.url,
+              let (data, _) = try? await slackGet(url, token: token) else { return [] }
+        struct Resp: Decodable {
+            let ok: Bool
+            let messages: [HistoryMessage]?
+        }
+        guard let parsed = try? JSONDecoder().decode(Resp.self, from: data), parsed.ok else { return [] }
+        return parsed.messages ?? []
+    }
+
+    /// One call per fetch to discover the workspace domain — needed to
+    /// construct permalinks for messages from conversations.history (which
+    /// doesn't return them, unlike search.messages). Falls back to a
+    /// best-effort `slack.com/archives/...` form when team.info is
+    /// unavailable; that URL still resolves correctly via Slack's
+    /// general redirect.
+    fileprivate static func teamDomain(token: String) async -> String? {
+        guard let url = URL(string: "https://slack.com/api/team.info"),
+              let (data, _) = try? await slackGet(url, token: token) else { return nil }
+        struct Resp: Decodable {
+            let ok: Bool
+            let team: Team?
+            struct Team: Decodable { let domain: String? }
+        }
+        let parsed = try? JSONDecoder().decode(Resp.self, from: data)
+        return (parsed?.ok == true) ? parsed?.team?.domain : nil
+    }
+
+    /// Slack permalinks: `https://<domain>.slack.com/archives/<CHAN>/p<TS>`
+    /// where TS has the dot stripped. When the team domain isn't known
+    /// we fall back to the generic `slack.com/archives/...` form — Slack
+    /// redirects this for authenticated users.
+    fileprivate static func permalinkFor(channelID: String, ts: String, domain: String?) -> String {
+        let tsCompact = ts.replacingOccurrences(of: ".", with: "")
+        if let d = domain, !d.isEmpty {
+            return "https://\(d).slack.com/archives/\(channelID)/p\(tsCompact)"
+        }
+        return "https://slack.com/archives/\(channelID)/p\(tsCompact)"
+    }
+
+    /// Fan-out wrapper: probe every channel in `candidates` for unread
+    /// state via conversations.info, parallelizing with `cap` requests
+    /// in flight at once. Returns the subset whose unread_count_display
+    /// is positive, paired with their last_read ts.
+    fileprivate static func unreadChannelStatuses(candidates: [Conversation],
+                                                   token: String,
+                                                   cap: Int) async -> [(Conversation, String)] {
+        var out: [(Conversation, String)] = []
+        await withTaskGroup(of: (Conversation, String)?.self) { group in
+            var next = 0
+            for c in candidates.prefix(cap) {
+                group.addTask { await Self.probeUnread(c: c, token: token) }
+                next += 1
+            }
+            while let result = await group.next() {
+                if next < candidates.count {
+                    let c = candidates[next]
+                    group.addTask { await Self.probeUnread(c: c, token: token) }
+                    next += 1
+                }
+                if let r = result { out.append(r) }
+            }
+        }
+        return out
+    }
+
+    private static func probeUnread(c: Conversation, token: String) async -> (Conversation, String)? {
+        guard let info = await conversationInfo(channelID: c.id, token: token) else { return nil }
+        guard (info.unread_count_display ?? 0) > 0 else { return nil }
+        guard let last = info.last_read, !last.isEmpty else { return nil }
+        return (c, last)
+    }
+
+    /// Filter the user's joined-conversation list down to candidates we'd
+    /// actually surface in the digest, applying the same prefs (deny /
+    /// allow / DM-MPIM-channel includes) the render path applies after.
+    /// Doing it pre-info-call saves API budget on channels we'd discard.
+    fileprivate static func conversationCandidates(_ all: [Conversation], prefs: SlackPrefs)
+        -> [Conversation]
+    {
+        let allow = prefs.allowlist
+        let deny = prefs.denylist
+        return all.compactMap { c in
+            if c.is_archived == true { return nil }
+            if c.is_member == false { return nil }
+            let chName = (c.name ?? "").lowercased()
+            if !chName.isEmpty && deny.contains(chName) { return nil }
+            let inAllowlist = !chName.isEmpty && allow.contains(chName)
+            if inAllowlist { return c }
+            let isIM = c.is_im == true
+            let isMPIM = c.is_mpim == true
+            let isChannel = !isIM && !isMPIM
+            if isIM, !prefs.includeDMs { return nil }
+            if isMPIM, !prefs.includeMPIMs { return nil }
+            if isChannel {
+                let channelOK = prefs.includeStarred || prefs.channelMode != .off
+                if !channelOK { return nil }
+            }
+            return c
+        }
+    }
+
+    /// History → Match conversion. Drops channel-join/leave/topic-change
+    /// noise (subtype is set for those), and skips messages with neither
+    /// a user id nor a bot id (rare malformed entries).
+    fileprivate static func matches(from history: [HistoryMessage],
+                                    in channel: Conversation,
+                                    domain: String?) -> [SearchResp.Match] {
+        let chShape = SearchResp.Match.Channel(
+            id: channel.id, name: channel.name,
+            is_im: channel.is_im, is_mpim: channel.is_mpim,
+            is_private: channel.is_private
+        )
+        return history.compactMap { m -> SearchResp.Match? in
+            guard let ts = m.ts else { return nil }
+            // Skip system noise: joins, leaves, topic changes, etc.
+            // bot_message subtype is what we explicitly DO want.
+            if let st = m.subtype, st != "bot_message", st != "thread_broadcast" {
+                return nil
+            }
+            // Need *something* identifying the sender, else the row is empty.
+            if (m.user ?? "").isEmpty && (m.bot_id ?? "").isEmpty && (m.username ?? "").isEmpty {
+                return nil
+            }
+            return SearchResp.Match(
+                channel: chShape,
+                user: m.user,
+                username: m.username,
+                text: m.text,
+                ts: ts,
+                permalink: permalinkFor(channelID: channel.id, ts: ts, domain: domain)
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     /// Slack messages use `<@U123>`, `<#C123|name>`, and `<!here>` tokens.
@@ -637,3 +948,4 @@ struct SlackSource: NotificationSource {
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
+
