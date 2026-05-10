@@ -129,6 +129,35 @@ struct SourceState: Codable, Equatable {
     var lastFetchedAt: Date?
     var lastItemCount: Int = 0
     var lastError: String?
+    /// Lower bound on unread items that existed on the server but we
+    /// didn't pull because the per-source soft cap kicked in. 0 when
+    /// fully drained. Surfaced in the panel footer as "N older items
+    /// not shown" so vacation-returners can tell their feed is capped.
+    var omittedCount: Int = 0
+
+    init(lastFetchedAt: Date? = nil, lastItemCount: Int = 0,
+         lastError: String? = nil, omittedCount: Int = 0) {
+        self.lastFetchedAt = lastFetchedAt
+        self.lastItemCount = lastItemCount
+        self.lastError = lastError
+        self.omittedCount = omittedCount
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastFetchedAt, lastItemCount, lastError, omittedCount
+    }
+
+    /// Hand-written decoder so state files written before pagination
+    /// landed (no `omittedCount` field) keep decoding cleanly — the
+    /// outer dictionary loader uses `try?` and would otherwise drop
+    /// every source's state on the first launch after the upgrade.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.lastFetchedAt = try c.decodeIfPresent(Date.self, forKey: .lastFetchedAt)
+        self.lastItemCount = try c.decodeIfPresent(Int.self, forKey: .lastItemCount) ?? 0
+        self.lastError = try c.decodeIfPresent(String.self, forKey: .lastError)
+        self.omittedCount = try c.decodeIfPresent(Int.self, forKey: .omittedCount) ?? 0
+    }
 }
 
 /// Token totals keyed by model — different prices, different rates.

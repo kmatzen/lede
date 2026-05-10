@@ -220,31 +220,18 @@ struct OutlookSource: NotificationSource {
         Keychain.get(Keychain.Key.microsoftRefresh(account.id)) != nil
     }
 
-    func fetch() async throws -> [RawItem] {
-        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else { return [] }
-
-        var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages")!
-        comps.queryItems = [
-            .init(name: "$filter", value: "isRead eq false"),
-            .init(name: "$select", value: "id,subject,from,bodyPreview,receivedDateTime,webLink"),
-            .init(name: "$top", value: "25"),
-            .init(name: "$orderby", value: "receivedDateTime desc"),
-        ]
-        var req = URLRequest(url: comps.url!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-
-        let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
-            if let http = resp as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
-                MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/mailFolders/Inbox/messages",
-                                                   response: http, body: data, accessToken: token)
-            }
-            throw SourceError(source: source,
-                              message: "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0) \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")")
+    func fetch() async throws -> FetchResult {
+        guard let token = await MicrosoftOAuth.validAccessToken(accountID: account.id) else {
+            return FetchResult(items: [])
         }
 
         struct ListResp: Decodable {
             let value: [Msg]
+            let nextLink: String?
+            enum CodingKeys: String, CodingKey {
+                case value
+                case nextLink = "@odata.nextLink"
+            }
             struct Msg: Decodable {
                 let id: String
                 let subject: String?
@@ -258,11 +245,62 @@ struct OutlookSource: NotificationSource {
                 }
             }
         }
+
+        // First page is built locally; subsequent pages use Graph's
+        // `@odata.nextLink` URL verbatim — Microsoft warns against
+        // reconstructing it (skiptokens are opaque). Walk until the
+        // cap is hit or there's no next link.
+        let firstURL: URL = {
+            var comps = URLComponents(string: "https://graph.microsoft.com/v1.0/me/mailFolders/Inbox/messages")!
+            comps.queryItems = [
+                .init(name: "$filter", value: "isRead eq false"),
+                .init(name: "$select", value: "id,subject,from,bodyPreview,receivedDateTime,webLink"),
+                .init(name: "$top", value: "50"),
+                .init(name: "$orderby", value: "receivedDateTime desc"),
+            ]
+            return comps.url!
+        }()
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let parsed = try decoder.decode(ListResp.self, from: data)
+
+        var msgs: [ListResp.Msg] = []
+        var omitted = 0
+        var nextURL: URL? = firstURL
+        let cap = SourcePagination.softCap
+
+        while let url = nextURL {
+            var req = URLRequest(url: url)
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let http = resp as? HTTPURLResponse, http.statusCode == 200 else {
+                if let http = resp as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
+                    MicrosoftOAuth.logGraphAuthFailure(endpoint: "/me/mailFolders/Inbox/messages",
+                                                       response: http, body: data, accessToken: token)
+                }
+                throw SourceError(source: source,
+                                  message: "HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0) \(String(data: data, encoding: .utf8)?.prefix(200) ?? "")")
+            }
+            let parsed = try decoder.decode(ListResp.self, from: data)
+            msgs.append(contentsOf: parsed.value)
+
+            if msgs.count >= cap {
+                if msgs.count > cap {
+                    omitted = max(omitted, msgs.count - cap)
+                    msgs = Array(msgs.prefix(cap))
+                }
+                if (parsed.nextLink ?? "").isEmpty == false {
+                    omitted = max(omitted, 1)
+                }
+                nextURL = nil
+            } else {
+                nextURL = parsed.nextLink.flatMap { URL(string: $0) }
+            }
+        }
+
         let acct = account
-        return parsed.value.map { m in
+        let items = msgs.map { m -> RawItem in
             let senderName = m.from?.emailAddress?.name
             let senderAddr = m.from?.emailAddress?.address
             let sender: String? = {
@@ -282,5 +320,7 @@ struct OutlookSource: NotificationSource {
                 isUnread: true
             )
         }
+        Log.info("outlook[\(acct.label)]: returned \(items.count) message(s)\(omitted > 0 ? " (cap hit, ≥\(omitted) more)" : "")")
+        return FetchResult(items: items, omitted: omitted)
     }
 }

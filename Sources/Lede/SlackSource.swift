@@ -229,6 +229,13 @@ struct SlackSource: NotificationSource {
         struct Messages: Decodable {
             let matches: [Match]?
             let total: Int?
+            /// Slack search includes a `paging` block with `pages` and
+            /// `page`; we use it to know when we've drained the cursor.
+            let paging: Paging?
+            struct Paging: Decodable {
+                let page: Int?
+                let pages: Int?
+            }
         }
         struct Match: Decodable {
             let channel: Channel?
@@ -247,8 +254,10 @@ struct SlackSource: NotificationSource {
         }
     }
 
-    func fetch() async throws -> [RawItem] {
-        guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else { return [] }
+    func fetch() async throws -> FetchResult {
+        guard let token = Keychain.get(Keychain.Key.slackAccess(account.id)) else {
+            return FetchResult(items: [])
+        }
         let userID = Keychain.get(Keychain.Key.slackUserID(account.id))
         let prefs = SlackPrefs(teamID: account.id)
 
@@ -264,19 +273,50 @@ struct SlackSource: NotificationSource {
         //      The recency window keeps us from dredging up old, already-
         //      handled reminders; users who want them gone earlier can
         //      dismiss in Lede (sticks per content hash).
-        let (unread, unreadTotal, http, parsed) = try await searchMessages(
-            query: "is:unread", count: 100, token: token
-        )
-        Log.info("slack[\(account.label)]: search.messages [is:unread] returned \(unread.count) of \(unreadTotal) message(s)")
+        //
+        // Walk `page=` on the unread query until either the soft cap is hit
+        // or the cursor is exhausted. `count=100` is Slack's per-page max.
+        // The Slackbot supplement is a single page — it's already date-
+        // bounded to recent days, so further pages would just be old noise.
+        let cap = SourcePagination.softCap
+        var unread: [SearchResp.Match] = []
+        var unreadTotal = 0
+        var http: HTTPURLResponse!
+        var parsed: SearchResp!
+        var pages = 1
+        var omitted = 0
+        var page = 1
+        while unread.count < cap {
+            let result = try await searchMessages(
+                query: "is:unread", count: 100, page: page, token: token
+            )
+            unread.append(contentsOf: result.matches)
+            unreadTotal = result.total
+            http = result.http
+            parsed = result.parsed
+            pages = result.parsed.messages?.paging?.pages ?? 1
+            if page >= pages { break }
+            page += 1
+        }
+        // Slack reports `total` even when `paging.pages` is missing or 1,
+        // so use it as the source of truth — a `pages=1, total=250`
+        // response (rare but observed) shouldn't silently lose 150 items.
+        if unread.count > cap {
+            unread = Array(unread.prefix(cap))
+        }
+        if unreadTotal > unread.count {
+            omitted = max(omitted, unreadTotal - unread.count)
+        }
+        Log.info("slack[\(account.label)]: search.messages [is:unread] returned \(unread.count) of \(unreadTotal) message(s) across \(min(page, pages)) page(s)\(omitted > 0 ? " (cap hit, ≥\(omitted) more)" : "")")
 
         let after = Self.afterDateString(daysBack: 2)
         var slackbotMatches: [SearchResp.Match] = []
         do {
-            let (m, total, _, _) = try await searchMessages(
-                query: "from:@slackbot after:\(after)", count: 20, token: token
+            let r = try await searchMessages(
+                query: "from:@slackbot after:\(after)", count: 20, page: 1, token: token
             )
-            Log.info("slack[\(account.label)]: search.messages [from:@slackbot after:\(after)] returned \(m.count) of \(total) message(s)")
-            slackbotMatches = m
+            Log.info("slack[\(account.label)]: search.messages [from:@slackbot after:\(after)] returned \(r.matches.count) of \(r.total) message(s)")
+            slackbotMatches = r.matches
         } catch {
             // Don't fail the whole fetch over a supplementary query.
             Log.warn("slack[\(account.label)]: Slackbot supplement query failed: \(error.localizedDescription)")
@@ -318,7 +358,7 @@ struct SlackSource: NotificationSource {
         let allow = prefs.allowlist
         let deny = prefs.denylist
 
-        return matches.compactMap { m -> RawItem? in
+        let items: [RawItem] = matches.compactMap { m -> RawItem? in
             guard let ch = m.channel, let ts = m.ts else { return nil }
             let isIM = ch.is_im == true
             let isMPIM = ch.is_mpim == true
@@ -369,19 +409,21 @@ struct SlackSource: NotificationSource {
                 isUnread: true
             )
         }
+        return FetchResult(items: items, omitted: omitted)
     }
 
     /// One `search.messages` call. Returns the matches, the API-reported
     /// total, the raw HTTP response (so callers can inspect headers like
     /// `X-OAuth-Scopes`), and the parsed envelope (for warnings / metadata).
     /// Throws on transport, decode, or `ok=false` errors.
-    private func searchMessages(query: String, count: Int, token: String)
+    private func searchMessages(query: String, count: Int, page: Int, token: String)
         async throws -> (matches: [SearchResp.Match], total: Int, http: HTTPURLResponse, parsed: SearchResp)
     {
         var comps = URLComponents(string: "https://slack.com/api/search.messages")!
         comps.queryItems = [
             .init(name: "query", value: query),
             .init(name: "count", value: String(count)),
+            .init(name: "page", value: String(page)),
             .init(name: "sort", value: "timestamp"),
             .init(name: "sort_dir", value: "desc"),
         ]

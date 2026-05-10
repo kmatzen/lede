@@ -173,41 +173,70 @@ struct GmailSource: NotificationSource {
         Keychain.get(Keychain.Key.googleRefresh(account.id)) != nil
     }
 
-    func fetch() async throws -> [RawItem] {
-        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else { return [] }
+    func fetch() async throws -> FetchResult {
+        guard let token = await GoogleOAuth.validAccessToken(accountID: account.id) else {
+            return FetchResult(items: [])
+        }
 
         // `gmail.metadata` scope forbids the `q` search param (Google: "query
         // text could expose body content"). So we filter by labelIds here —
         // INBOX ∧ UNREAD — and drop the category-labeled stuff client-side
         // once we have each message's labelIds.
-        var listURL = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
-        listURL.queryItems = [
-            .init(name: "labelIds", value: "INBOX"),
-            .init(name: "labelIds", value: "UNREAD"),
-            .init(name: "maxResults", value: "40"),
-        ]
-        var listReq = URLRequest(url: listURL.url!)
-        listReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (listData, listResp) = try await URLSession.shared.data(for: listReq)
-        guard let http = listResp as? HTTPURLResponse, http.statusCode == 200 else {
-            let body = String(data: listData, encoding: .utf8) ?? ""
-            throw SourceError(
-                source: source,
-                message: "list HTTP \((listResp as? HTTPURLResponse)?.statusCode ?? 0) — \(body.prefix(400))"
-            )
-        }
+        //
+        // Walk `nextPageToken` until we hit the soft cap or the cursor is
+        // exhausted. `maxResults` per page is 100 (Gmail's default ceiling
+        // for messages.list); the soft cap then bounds total work without
+        // making each round-trip wastefully small.
         struct ListResp: Decodable {
             let messages: [Ref]?
+            let nextPageToken: String?
             struct Ref: Decodable { let id: String }
         }
-        let ids = (try JSONDecoder().decode(ListResp.self, from: listData).messages ?? []).map { $0.id }
-        Log.info("gmail[\(account.label)]: list returned \(ids.count) message id(s)")
+        var ids: [String] = []
+        var pageToken: String? = nil
+        var omitted = 0
+        let cap = SourcePagination.softCap
+        repeat {
+            var listURL = URLComponents(string: "https://gmail.googleapis.com/gmail/v1/users/me/messages")!
+            var items: [URLQueryItem] = [
+                .init(name: "labelIds", value: "INBOX"),
+                .init(name: "labelIds", value: "UNREAD"),
+                .init(name: "maxResults", value: "100"),
+            ]
+            if let t = pageToken { items.append(.init(name: "pageToken", value: t)) }
+            listURL.queryItems = items
+            var listReq = URLRequest(url: listURL.url!)
+            listReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let (listData, listResp) = try await URLSession.shared.data(for: listReq)
+            guard let http = listResp as? HTTPURLResponse, http.statusCode == 200 else {
+                let body = String(data: listData, encoding: .utf8) ?? ""
+                throw SourceError(
+                    source: source,
+                    message: "list HTTP \((listResp as? HTTPURLResponse)?.statusCode ?? 0) — \(body.prefix(400))"
+                )
+            }
+            let parsed = try JSONDecoder().decode(ListResp.self, from: listData)
+            for ref in parsed.messages ?? [] { ids.append(ref.id) }
+            // Soft cap: if we already have enough and there's still more,
+            // record a "≥1 more exists" hint and stop.
+            if ids.count >= cap {
+                if (parsed.nextPageToken ?? "").isEmpty == false || ids.count > cap {
+                    omitted = max(omitted, max(1, ids.count - cap))
+                }
+                if ids.count > cap { ids = Array(ids.prefix(cap)) }
+                pageToken = nil
+            } else {
+                let next = parsed.nextPageToken ?? ""
+                pageToken = next.isEmpty ? nil : next
+            }
+        } while pageToken != nil
+        Log.info("gmail[\(account.label)]: list returned \(ids.count) message id(s)\(omitted > 0 ? " (cap hit, ≥\(omitted) more)" : "")")
 
         let acct = account
         // Gmail returns HTTP 429 "Too many concurrent requests for user." well
         // before any per-second quota kicks in. Cap in-flight gets at 8.
         let maxInFlight = 8
-        return await withTaskGroup(of: MetadataResult.self) { group in
+        let items = await withTaskGroup(of: MetadataResult.self) { group -> [RawItem] in
             var out: [RawItem] = []
             var filtered = 0
             var errored = 0
@@ -231,6 +260,7 @@ struct GmailSource: NotificationSource {
             Log.info("gmail[\(acct.label)]: kept \(out.count), filtered \(filtered), errored \(errored)")
             return out
         }
+        return FetchResult(items: items, omitted: omitted)
     }
 
     private enum MetadataResult { case kept(RawItem), filtered, errored }
